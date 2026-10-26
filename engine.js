@@ -6,7 +6,7 @@
   else root.Budgie = factory();
 })(this, function () {
   "use strict";
-  var VERSION = "1.3.0";
+  var VERSION = "1.4.0";
 
   // ---------- dates ----------
   function D(s) { var p = String(s).split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
@@ -179,7 +179,25 @@
     });
     db.settleKeys = {};
     db.settlements.forEach(function (s) { if (s.key) db.settleKeys[s.key] = true; });
+    // yearly costs: a bill that comes round every 3 months or more has money set aside for it each pay period,
+    // unless setAside is turned off ("FALSE"); left blank, it follows the schedule
+    db.bills.forEach(function (b) { b.setAside = b.setAside === undefined || b.setAside === null || b.setAside === "" ? longRepeat(b) : toBool(b.setAside); });
     return db;
+  }
+  // a schedule that repeats every 3 months (12 weeks) or more
+  function longRepeat(it) {
+    var u = String(it.unit || "month").toLowerCase(), e = Math.max(1, +it.every || 1);
+    if (u === "year" || u === "years") return true;
+    if (u === "month" || u === "months" || u === "") return e >= 3;
+    if (u === "week" || u === "weeks") return e >= 12;
+    if (u === "day" || u === "days") return e >= 84;
+    if (u === "dates") {
+      var ds = uniqSorted(String(it.dates || "").split(/[,;\n]+/).map(parseDate).filter(Boolean));
+      if (ds.length < 2) return false;
+      for (var i = 1; i < ds.length; i++) if (diff(ds[i - 1], ds[i]) < 84) return false;
+      return true;
+    }
+    return false;   // once
   }
   function setting(db, person, key, dflt) { var v = (db.set[person] || {})[key]; if (v === undefined || v === "") v = (db.set.all || {})[key]; return v === undefined || v === "" ? dflt : v; }
   function person(db, id) { return db.byId[id] || {id: id, name: id}; }
@@ -252,9 +270,10 @@
     return out;
   }
   // every tracked pay period that starts before a date, from one list worked out once
+  function trackedList(db, p) { var st = startOf(db, p); return memo(db, "tper|" + p, function () { return periods(db, p, st, addDays(maxS(db.today || st, st), 1100)); }); }
   function trackedBefore(db, p, date) {
     var st = startOf(db, p);
-    var all = memo(db, "tper|" + p, function () { return periods(db, p, st, addDays(maxS(db.today || st, st), 1100)); });
+    var all = trackedList(db, p);
     var last = all[all.length - 1];
     var list = last && date <= last.next ? all : periods(db, p, st, date);
     return list.filter(function (pk) { return pk.start < date && pk.next > st; });
@@ -332,8 +351,29 @@
     });
   }
 
+  // ---------- yearly costs (sinking funds) ----------
+  // a pot (not the fallback one) or the main account can hold money set aside for a bill
+  function holdsSetAside(db, p, acc) { var a = db.byId[acc]; return acc === mainOf(db, p) || (!!a && a.owner === p && a.kind === "pot" && !a.fallback); }
+  function setAsideBills(db, p) { return memo(db, "sab|" + p, function () { return db.bills.filter(function (b) { return b.person === p && b.setAside && holdsSetAside(db, p, b.account || mainOf(db, p)); }); }); }
+  // the first occurrence of a bill on or after a date (from one list worked out once per bill)
+  function nextOcc(db, b, from) {
+    var st = startOf(db, b.person), horizon = addDays(maxS(db.today || st, st), 2200);
+    var list = from > addDays(horizon, -1500) ? occurrences(db, b, from, addDays(from, 1500)) : memo(db, "bocc|" + b.id, function () { return occurrences(db, b, addDays(st, -1), horizon); });
+    for (var i = lowerBound(list.map(function (o) { return o.date; }), from); i < list.length; i++) if (list[i].amount > 0) return list[i];
+    return null;
+  }
+  // how many pay periods from this one up to and including the one a date falls in
+  function periodsUntil(db, p, per, date) {
+    var all = trackedList(db, p), last = all[all.length - 1];
+    if (!last || date >= last.next) return periods(db, p, per.start, addDays(date, 1)).length;
+    var starts = memo(db, "tpst|" + p, function () { return all.map(function (pk) { return pk.start; }); });
+    return Math.max(1, lowerBound(starts, addDays(date, 1)) - lowerBound(starts, per.start));
+  }
+
   // ---------- the plan for one pay period ----------
   // lines: {kind: in|bill|spend|save|topup|remainder, name, amount, account, date, id}
+  // a yearly cost adds {kind: "save", setAside: true, bill, name: "Set aside for …", amount, account, due} each pay
+  // period until it's due, and {kind: "in", setAside: true, bill, name: "Saved up for …"} when it lands
   function planFor(db, p, per, noTopup) { return memo(db, "plan|" + p + "|" + per.start + "|" + per.next + "|" + (noTopup ? 1 : 0), function () { return plan0(db, p, per, noTopup); }, function () { return planFor(db, p, per, true); }); }
   function plan0(db, p, per, noTopup) {
     var lines = [], partner = partnerOf(db, p), main = mainOf(db, p), st = startOf(db, p), from = per.start, to = per.next;
@@ -388,14 +428,18 @@
     // into the new month. Worked out once the period has started, and estimated for the next payday.
     var pv0 = db.today && from > addDays(db.today, 1) ? prevPeriod(db, p, per) : null, upcoming = !!(pv0 && pv0.start <= db.today);
     // money saved into a pot for something later (a sinking fund) is kept for that pot's bills, carried from period to period
-    var pvR = per.opening ? null : prevPeriod(db, p, per), resIn = pvR && pvR.start < from && pvR.next > st ? (planFor(db, p, pvR).reserveOut || {}) : {}, reserveOut = {};
+    var pvR = per.opening ? null : prevPeriod(db, p, per), prevPl = pvR && pvR.start < from && pvR.next > st ? planFor(db, p, pvR) : null;
+    // saIn: what's been set aside so far for each yearly cost (by bill), kept apart from the saving-budget reserve
+    var resIn = prevPl ? (prevPl.reserveOut || {}) : {}, saIn = prevPl ? (prevPl.setAside || {}) : {}, reserveOut = {}, setOut = {}, saShort = {};
     var potOk = function (id) { var a = db.byId[id]; return a && a.owner === p && a.kind === "pot" && !a.fallback; };
     Object.keys(resIn).forEach(function (id) { reserveOut[id] = resIn[id]; });
-    if (!per.opening && from >= st && (!db.today || from <= addDays(db.today, 1) || upcoming)) {
-      var first = from === st, dayBefore = addDays(from, -1), bal = Object.assign({}, first ? startBalances(db, p) : balances(db, dayBefore)), pv = prevPeriod(db, p, per), bst = !first && pv && pv.start < from ? budgetState(db, p, pv) : {};
+    var est = !per.opening && from >= st && (!db.today || from <= addDays(db.today, 1) || upcoming), bal = {}, keepOf = function () { return 0; };
+    if (est) {
+      var first = from === st, dayBefore = addDays(from, -1), pv = prevPeriod(db, p, per), bst = !first && pv && pv.start < from ? budgetState(db, p, pv) : {};
+      bal = Object.assign({}, first ? startBalances(db, p) : balances(db, dayBefore));
       // what each budget keeps in its pot: what carries over, and before payday whatever is still left to spend
       // (including "whatever is left" budgets, which can still be spent until payday)
-      var keepOf = function (accId) { var k = 0; Object.keys(bst).forEach(function (id) { var s = bst[id]; if ((s.budget.account || main) !== accId || s.budget.mode === "saving") return; k += upcoming ? Math.max(s.carryOut || 0, (s.avail || 0) - (s.spent || 0), 0) : (s.carryOut || 0); }); return k; };
+      keepOf = function (accId) { var k = 0; Object.keys(bst).forEach(function (id) { var s = bst[id]; if ((s.budget.account || main) !== accId || s.budget.mode === "saving") return; k += upcoming ? Math.max(s.carryOut || 0, (s.avail || 0) - (s.spent || 0), 0) : (s.carryOut || 0); }); return k; };
       // moves still on the To do count as done, so a forgotten tick doesn't ask for the money twice;
       // but a balance checked on or after the move already includes it, so that side is left alone
       var vd = {}; db.valuations.forEach(function (v) { if (v.date <= dayBefore && v.date > (vd[v.account] || "")) vd[v.account] = v.date; });
@@ -408,10 +452,46 @@
         if (pk.pay && !pk.opening) payday(db, p, pk).moves.forEach(function (m) { if (!db.moveKeys["pay:" + pk.start + ":" + m.to]) pendMove(m.from, m.to, m.amount, pk.start); });
         reimbursements(db, p, pk, minS(dayBefore, addDays(pk.next, -1))).forEach(function (g) { var left = round(g.amount - (db.moveKeys[g.key] || 0)); if (left > 0.004) pendMove(g.from, g.to, left, g.date || pk.start); });
       });
+    }
+    // yearly costs (sinking funds). Each pay period puts by (next amount - set aside so far) / pay periods left until
+    // it's due (this one included). In the period it lands, what was set aside pays it ("Saved up for …") and only
+    // the rest comes from this pay, so the instalments add up to the bill once. Then the cycle starts again.
+    // The money set aside is carried in plan.setAside (by bill), like the saving-budget reserve (fix #13), but kept
+    // apart: it only ever pays its own bill. A pot can also have a saving budget of its own (say "Car fund"): both
+    // are kept, and neither counts the other's money, so nothing is counted twice.
+    var held = {}, usedE = {};
+    if (!per.opening && from >= st) {
+      var sab = setAsideBills(db, p), saReal = {}, byAcc = {};
+      sab.forEach(function (b) { var acc = b.account || main; (byAcc[acc] = byAcc[acc] || []).push(b); });
+      // once the period has started (or is next), only what's really in the pot counts as set aside
+      Object.keys(byAcc).forEach(function (acc) {
+        var tot = 0; byAcc[acc].forEach(function (b) { tot += saIn[b.id] || 0; });
+        var f = est && tot > 0.004 ? Math.min(1, Math.max(0, round((bal[acc] || 0) - keepOf(acc))) / tot) : 1;
+        byAcc[acc].forEach(function (b) { var v = round((saIn[b.id] || 0) * f); saReal[b.id] = v; if (v < (saIn[b.id] || 0) - 0.004) saShort[b.id] = round(saIn[b.id] - v); });
+      });
+      sab.forEach(function (b) {
+        var acc = b.account || main, have = saReal[b.id] || 0, due = 0;
+        lines.forEach(function (l) { if (l.kind === "bill" && l.id === b.id && !l.transfer && !l.loan && !l.catchup) due += l.amount; });
+        if (due > 0.004) {
+          var use = round(Math.min(have, due));
+          if (use > 0.004) lines.push({kind: "in", setAside: true, bill: b.id, name: "Saved up for " + b.name, amount: use, account: acc, id: "setaside:" + b.id, estimate: est && upcoming});
+          usedE[acc] = round((usedE[acc] || 0) + use); held[acc] = round((held[acc] || 0) + use);
+          return;   // anything over is released next period
+        }
+        held[acc] = round((held[acc] || 0) + have);
+        var o = nextOcc(db, b, to); if (!o) return;
+        var amt = round(Math.max(0, o.amount - have) / periodsUntil(db, p, per, o.date));
+        if (amt > 0.004) lines.push({kind: "save", setAside: true, bill: b.id, name: "Set aside for " + b.name, amount: amt, account: acc, id: "setaside:" + b.id, due: o.date});
+        setOut[b.id] = round(have + amt);
+      });
+    }
+    if (est) {
       accountsOf(db, p).forEach(function (a) {
         if (a.kind !== "pot" || a.fallback) return;
         var needs = 0, billNeeds = 0; lines.forEach(function (l) { if (l.kind !== "in" && l.account === a.id) { needs += l.amount; if (l.kind === "bill") billNeeds += l.amount; } });
-        var spare = round((bal[a.id] || 0) - keepOf(a.id)), R = round(Math.min(resIn[a.id] || 0, Math.max(0, spare))), free = round(spare - R);
+        // money set aside for yearly costs is spoken for: it has paid its own bill above, and is kept for the rest
+        needs -= usedE[a.id] || 0; billNeeds -= usedE[a.id] || 0;
+        var spare = round((bal[a.id] || 0) - keepOf(a.id) - (held[a.id] || 0)), R = round(Math.min(resIn[a.id] || 0, Math.max(0, spare))), free = round(spare - R);
         // spare money counts towards anything the pot needs; the saved-up money only towards its bills
         var useFree = free > 0.004 ? Math.min(free, needs) : 0, billsLeft = Math.max(0, billNeeds - Math.max(0, useFree - (needs - billNeeds))), useR = Math.min(R, billsLeft);
         reserveOut[a.id] = round(R - useR);
@@ -420,18 +500,19 @@
         else if (spare < -0.004) lines.push({kind: "bill", name: "Catch up " + a.name, amount: round(-spare), account: a.id, id: "catchup", catchup: true, estimate: upcoming});
       });
       if (bal[main] !== undefined) {
-        var left0 = round(bal[main] - keepOf(main));
+        var left0 = round(bal[main] - keepOf(main) - (held[main] || 0));
         if (left0 > 0.004) lines.push({kind: "in", name: "Left in " + accName(db, main) + " from last month", amount: left0, account: main, id: "leftover", leftover: true, estimate: upcoming});
         else if (left0 < -0.004) lines.push({kind: "bill", name: "Catch up " + accName(db, main), amount: round(-left0), account: main, id: "catchup", catchup: true, estimate: upcoming});
       }
     }
-    lines.forEach(function (l) { if (l.kind === "save" && potOk(l.account)) reserveOut[l.account] = round((reserveOut[l.account] || 0) + l.amount); });
+    lines.forEach(function (l) { if (l.kind === "save" && !l.setAside && potOk(l.account)) reserveOut[l.account] = round((reserveOut[l.account] || 0) + l.amount); });
     Object.keys(reserveOut).forEach(function (id) { if (!potOk(id) || !(reserveOut[id] > 0.004)) delete reserveOut[id]; });
+    Object.keys(setOut).forEach(function (id) { if (!(setOut[id] > 0.004)) delete setOut[id]; });
     var tin = 0, tout = 0;
     lines.forEach(function (l) { if (l.kind === "in") tin += l.amount; else tout += l.amount; });
     var left = round(tin - tout);
     if (per.opening && remainder && savingKind(db, remainder.account)) left = 0;
-    var res = {period: per, lines: lines, totalIn: round(tin), totalOut: round(tout), remainder: Math.max(0, round(left)), shortfall: left < 0 ? round(-left) : 0, remainderBudget: remainder, opening: !!per.opening, reserveOut: reserveOut};
+    var res = {period: per, lines: lines, totalIn: round(tin), totalOut: round(tout), remainder: Math.max(0, round(left)), shortfall: left < 0 ? round(-left) : 0, remainderBudget: remainder, opening: !!per.opening, reserveOut: reserveOut, setAside: setOut, setAsideShort: saShort};
     if (remainder) lines.push({kind: remainder.account && (db.byId[remainder.account] || {}).kind !== "main" && /saving|isa|lisa|pension/.test((db.byId[remainder.account] || {}).kind) ? "save" : "spend", name: remainder.name, amount: res.remainder, account: remainder.account || main, id: remainder.id, mode: "remainder", remainder: true});
     var sum = function (k) { var t = 0; lines.forEach(function (l) { if (l.kind === k) t += l.amount; }); return round(t); };
     res.totals = {in: sum("in"), bills: sum("bill"), spend: sum("spend"), save: round(sum("save") + sum("topup"))};
@@ -718,6 +799,8 @@
     var spendAccs = {}; tiles.forEach(function (t) { var b = db.byId[t.id]; if (t.day !== null) spendAccs[b.account || main] = true; });
     var committed = 0; flows(db, date, addDays(per.next, -1)).forEach(function (f) { if (spendAccs[f.account]) committed += f.amount; });
     Object.keys(spendAccs).forEach(function (a) { cash += bal[a] || 0; });
+    // money set aside for a yearly cost that isn't due before payday isn't spare
+    Object.keys(plan.setAside || {}).forEach(function (id) { var b = db.byId[id], acc = b ? b.account || main : ""; if (spendAccs[acc]) committed -= Math.min(plan.setAside[id], Math.max(0, bal[acc] || 0)); });
     var cashFree = round(Math.max(0, cash + committed));
     var cap = round(cashFree / daysLeft);
     if (safe > cap) { safe = cap; status = cashFree <= 0 ? "No spare cash" : status; }
@@ -824,20 +907,162 @@
       });
       db.income.forEach(function (i) { if (i.account === accId) occurrences(db, i, addDays(date, 1), addDays(tyEnd, 1)).forEach(function (o) { planned += o.amount; }); });
     }
-    var onCourse = round(paid + planned);
+    var onCourse = round(paid + planned), exp = expectedBonus(db, accId, date, before, ownerStart), expTot = 0;
+    exp.forEach(function (x) { expTot += x.amount; });
     return {account: accId, name: accName(db, accId), balance: bal, paidThisYear: paid, paidBefore: before, allowanceLeft: round(Math.max(0, 4000 - paid)), bonusThisYear: bonus, taxYearStart: tys, taxYearEnd: tyEnd,
       planned: round(planned), onCourse: onCourse, overBy: round(Math.max(0, onCourse - 4000)), series: series,
-      bonusReceived: round(bonusIn), feesThisYear: round(fees), months: monthList, checks: db.valuations.filter(function (v) { return v.account === accId; }).length};
+      bonusReceived: round(bonusIn), feesThisYear: round(fees), months: monthList, checks: db.valuations.filter(function (v) { return v.account === accId; }).length,
+      expectedBonus: exp, expectedBonusTotal: round(expTot)};
+  }
+  // the government bonus still to come: 25% of each payment in that hasn't had its bonus yet, by the month it was
+  // paid in: [{amount, due, for: "YYYY-MM"}]. Not part of the balance until it lands.
+  // Payments in: statement rows (lisa:in, not the ones that are the same money as a ticked move), payday ticks
+  // (pay:<date>:<acc>) and bank feed rows (bank:…) into the LISA. Bonuses: lisa:bonus moves.
+  // Moneybox claims the bonus monthly and it lands 4 to 6 weeks after the payment, so due = payment + 6 weeks.
+  // Matching: bonuses are taken in date order, and each one settles the oldest payments still waiting that were made
+  // before it landed (a bonus is never for money paid later). So one bonus can settle two payments (167 on 30 Jul for
+  // 11 May and 9 Jul), and later ones go to the next in line (83.50 on 3 Sep for 7 Aug, 1 Oct for 9 Sep, 26 Oct for
+  // 30 Sep). Whatever a bonus has left over is for money paid in before the history Budgie has, and is dropped.
+  // Payments over the £4,000 a tax year get no bonus.
+  function expectedBonus(db, accId, date, before, ownerStart) {
+    var pays = [], bons = [];
+    db.moves.forEach(function (m) {
+      var k = String(m.key || ""), a = +m.amount || 0;
+      if (m.to !== accId || !(a > 0) || m.date > date) return;
+      if (/^lisa:bonus/.test(k)) bons.push({date: m.date, amount: a});
+      else if (!m.dup && (/^lisa:in/.test(k) || /^pay:\d{4}-\d{2}-\d{2}:/.test(k) || /^bank:/.test(k))) pays.push({date: m.date, amount: a});
+    });
+    var byDate = function (x, y) { return x.date < y.date ? -1 : x.date > y.date ? 1 : 0; };
+    pays.sort(byDate); bons.sort(byDate);
+    // what's been paid in each tax year so far (money paid before Budgie's history counts towards the £4,000)
+    var cum = {}, early = 0, sty = ownerStart ? taxYearStart(ownerStart) : "";
+    pays.forEach(function (x) { if (sty && x.date >= sty && x.date < ownerStart) early += x.amount; });
+    if (sty && before) cum[sty] = Math.max(0, before - early);
+    pays.forEach(function (x) { var ty = taxYearStart(x.date), c = cum[ty] || 0; x.want = 0.25 * Math.min(x.amount, Math.max(0, 4000 - c)); cum[ty] = c + x.amount; });
+    var i0 = 0;
+    bons.forEach(function (bn) {
+      var credit = bn.amount;
+      for (var i = i0; i < pays.length && credit > 0.004 && pays[i].date < bn.date; i++) {
+        var take = Math.min(credit, pays[i].want); pays[i].want -= take; credit -= take;
+      }
+      while (i0 < pays.length && pays[i0].want <= 0.004) i0++;
+    });
+    var months = {}, out = [];
+    pays.forEach(function (x) {
+      if (!(x.want > 0.004)) return;
+      var k = x.date.slice(0, 7), m = months[k];
+      if (!m) { m = months[k] = {amount: 0, due: "", "for": k}; out.push(m); }
+      m.amount += x.want; m.due = maxS(m.due, addDays(x.date, 42));
+    });
+    out.forEach(function (m) { m.amount = round(m.amount); });
+    return out;
+  }
+
+  // ---------- yearly costs, for the Bills screen ----------
+  // [{id, name, amount, next, monthly, saved, account, accountName, periods, onTrack}], soonest first
+  // next/amount: the next time it's due on or after date. monthly: what this pay period sets aside for it (when it's
+  // due this pay period: the part this pay covers, after what was saved). saved: what's put by for it now (once this
+  // period's set-aside is in). periods: pay periods left until it's due, this one included. onTrack: the pot really
+  // holds what was set aside, and this pay stretches to it.
+  function yearly(db, p, date) {
+    var per = periodAt(db, p, date), pl = planFor(db, p, per), pd = payday(db, p, per), main = mainOf(db, p);
+    return setAsideBills(db, p).map(function (b) {
+      var o = nextOcc(db, b, date), acc = b.account || main, line = null, used = null;
+      pl.lines.forEach(function (l) { if (l.setAside && l.bill === b.id) { if (l.kind === "save") line = l; else used = l; } });
+      var dueNow = !!o && o.date < per.next, saved = dueNow ? (used ? used.amount : 0) : (pl.setAside[b.id] || 0);
+      var monthly = dueNow ? Math.max(0, o.amount - saved) : (line ? line.amount : 0);
+      return {id: b.id, name: b.name, amount: o ? o.amount : amountAt(db, b, date), next: o ? o.date : "", monthly: round(monthly), saved: round(saved), account: acc, accountName: accName(db, acc),
+        periods: o ? Math.max(1, periodsUntil(db, p, per, o.date) - (per.opening && o.date >= per.next ? 1 : 0)) : 0, onTrack: !(pl.setAsideShort[b.id] > 0.004) && !(pd.uncovered > 0.004)};
+    }).sort(function (a, b) { return (a.next || "9999") < (b.next || "9999") ? -1 : (a.next || "9999") > (b.next || "9999") ? 1 : 0; });
+  }
+
+  // ---------- the tax year round-up ----------
+  // yearReview(db, p, "YYYY-04-06"): the tax year so far (to the day the data was loaded for), or the whole of it.
+  // {from, to, until, in, bills, billsBy: [{id, name, amount, count}], saved, savedPct, spent: [{budget, name, amount}],
+  //  lisa: {paidIn, bonus, fees, value, expectedBonus}, goals: [{id, name, start, end, target}],
+  //  biggestMonth: {month: "YYYY-MM", name, amount} or null, noSpendDays}
+  // in and bills are what the plan counts: pay and other income, your partner's transfers and loan repayments to you;
+  // bills, transfers to your partner and loan repayments you make. saved is what went into savings, ISAs and the LISA
+  // (planned savings, what's left, top-ups and money paid straight in), less what came back out of them.
+  // spent is your share of logged payments by budget. Only days from when tracking started count.
+  function yearReview(db, p, tys) {
+    var from = taxYearStart(parseDate(tys) || db.today || startOf(db, p)), to = addDays(ymd(+from.slice(0, 4) + 1, 3, 6), -1), st = startOf(db, p);
+    var until = db.today && db.today < to ? db.today : to, lo = maxS(from, st), end = addDays(until, 1), live = lo <= until;
+    var main = mainOf(db, p), tin = 0, tbill = 0, billsBy = {}, billList = [];
+    var addBill = function (id, name, amt) { var x = billsBy[id]; if (!x) { x = billsBy[id] = {id: id, name: name, amount: 0, count: 0}; billList.push(x); } x.amount += amt; x.count++; tbill += amt; };
+    if (live) {
+      db.income.forEach(function (i) { if (i.person === p) occurrences(db, i, lo, end).forEach(function (o) { tin += o.amount; }); });
+      db.transfers.forEach(function (t) {
+        if (t.to !== p && t.from !== p) return;
+        occurrences(db, t, maxS(lo, startOf(db, t.from)), end).forEach(function (o) { if (t.to === p) tin += o.amount; else addBill(t.id, (t.name || t.purpose || "Transfer") + " (to " + person(db, t.to).name + ")", o.amount); });
+      });
+      db.bills.forEach(function (b) { if (b.person === p) occurrences(db, b, lo, end).forEach(function (o) { addBill(b.id, b.name, o.amount); }); });
+      db.loans.forEach(function (l) {
+        if (l.lender !== p && l.borrower !== p) return;
+        loanPlan(db, l).forEach(function (r) { if (r.date < lo || r.date > until) return; if (l.lender === p) tin += r.amount; else addBill(l.id, "Pay " + person(db, l.lender).name + " back: " + l.name, r.amount); });
+      });
+    }
+    // saved: from each pay period that started in the year, less money taken back out of savings
+    var saved = 0, mineSaving = function (acc) { var a = db.byId[acc]; return !!a && a.owner === p && savingKind(db, acc); };
+    if (live) {
+      trackedBefore(db, p, end).forEach(function (pk) {
+        if (pk.start < lo) return;
+        planFor(db, p, pk).lines.forEach(function (l) { if ((l.kind === "save" || l.kind === "topup") && !l.setAside && mineSaving(l.account)) saved += l.amount; });
+      });
+      db.moves.forEach(function (m) { if (!m.dup && m.date >= lo && m.date <= until && !/^lisa:/.test(m.key || "") && mineSaving(m.from) && !mineSaving(m.to)) saved -= +m.amount || 0; });
+      db.transactions.forEach(function (x) { if (x.date >= lo && x.date <= until && mineSaving(x.account)) saved -= +x.amount || 0; });
+    }
+    // spending by budget and by calendar month, and the days you spent nothing
+    var spentBy = {}, spentList = [], months = {}, spendDay = {}, byName = {};
+    db.budgets.forEach(function (b) { if (b.person === p) byName[String(b.name).toLowerCase()] = b; });
+    if (live) db.transactions.forEach(function (x) {
+      if (x.date < lo || x.date > until) return;
+      if (x.person === p && +x.amount > 0) spendDay[x.date] = true;
+      var sh = myShare(db, p, x); if (!sh) return;
+      var b = db.byId[x.budget], mine = b && b.person === p ? b : (b && byName[String(b.name).toLowerCase()]) || null, k = mine ? mine.id : b ? b.id : "";
+      var g = spentBy[k]; if (!g) { g = spentBy[k] = {budget: k, name: mine ? mine.name : b ? b.name : "Other", amount: 0}; spentList.push(g); }
+      g.amount += sh; months[x.date.slice(0, 7)] = (months[x.date.slice(0, 7)] || 0) + sh;
+    });
+    spentList.forEach(function (g) { g.amount = round(g.amount); });
+    spentList = spentList.filter(function (g) { return Math.abs(g.amount) > 0.004; }).sort(function (a, b) { return b.amount - a.amount; });
+    var big = null; Object.keys(months).sort().forEach(function (k) { if (!big || months[k] > big.amount + 0.004) big = {month: k, name: MONTHS[+k.slice(5, 7) - 1] + " " + k.slice(0, 4), amount: months[k]}; });
+    if (big) big.amount = round(big.amount);
+    var noSpend = 0; if (live) for (var d = lo; d <= until; d = addDays(d, 1)) if (!spendDay[d]) noSpend++;
+    // the LISA over the year (added up if there's more than one)
+    var L = {paidIn: 0, bonus: 0, fees: 0, value: 0, expectedBonus: 0};
+    accountsOf(db, p).forEach(function (a) {
+      if (a.kind !== "lisa") return;
+      var x = lisa(db, a.id, until); L.paidIn += x.paidThisYear; L.bonus += x.bonusReceived; L.fees += x.feesThisYear; L.value += x.balance; L.expectedBonus += x.expectedBonusTotal;
+    });
+    Object.keys(L).forEach(function (k) { L[k] = round(L[k]); });
+    var g0 = {}; goals(db, p, addDays(lo, -1)).forEach(function (g) { g0[g.id] = g.saved; });
+    billList.forEach(function (x) { x.amount = round(x.amount); });
+    saved = round(saved); tin = round(tin);
+    return {from: from, to: to, until: until, "in": tin, bills: round(tbill), billsBy: billList.sort(function (a, b) { return b.amount - a.amount; }),
+      saved: saved, savedPct: tin > 0 ? Math.round(saved / tin * 100) : 0, spent: spentList, lisa: L,
+      goals: goals(db, p, live ? until : addDays(lo, -1)).map(function (g) { return {id: g.id, name: g.name, start: round(g0[g.id] || 0), end: g.saved, target: g.target}; }),
+      biggestMonth: big, noSpendDays: noSpend};
   }
 
   // ---------- things to check ----------
   // settings rows "check:<id>" hold {t: what to check, a: action, v: what it opens}; "done" once confirmed
-  function checks(db, p) {
+  // date (optional, default the day the data was loaded for): adds a monthly reminder to check each Lifetime ISA
+  // that hasn't had its value checked in the last 30 days. It isn't stored: a new valuation clears it, and
+  // "It's right" (settings check:<id> = done) hides it for that month only, as the id carries the month.
+  function checks(db, p, date) {
     var s = db.set[p] || {}, out = [];
     Object.keys(s).forEach(function (k) {
       if (!/^check:/.test(k) || !s[k] || /^done$/i.test(String(s[k]))) return;
       var c; try { c = JSON.parse(s[k]); } catch (e) { c = {t: String(s[k])}; }
       out.push({id: k.slice(6), key: k, text: c.t || "", action: c.a || "", value: c.v || "", order: +c.o || 50});
+    });
+    date = date || db.today;
+    if (isIso(date)) accountsOf(db, p).forEach(function (a) {
+      if (a.kind !== "lisa") return;
+      var id = "lisa-month-" + date.slice(0, 7) + "-" + a.id, since = addDays(date, -30);
+      if (s["check:" + id] !== undefined && s["check:" + id] !== "") return;   // dismissed (or stored) for this month
+      if (db.valuations.some(function (v) { return v.account === a.id && v.date >= since && v.date <= date; })) return;
+      out.push({id: id, key: "check:" + id, text: "Check your Lifetime ISA in Moneybox and update its value", action: "potcheck", value: a.id, order: 40});
     });
     return out.sort(function (a, b) { return a.order - b.order; });
   }
@@ -889,6 +1114,7 @@
     periods: periods, periodAt: periodAt, prevPeriod: prevPeriod, nextPeriod: nextPeriod, planFor: planFor, payday: payday,
     budgetState: budgetState, balances: balances, flows: flows, todo: todo, between: between, today: today, coming: coming,
     calendar: calendar, pots: pots, monthView: monthView, year: year, goals: goals, lisa: lisa, checks: checks, netWorth: netWorth, loans: loans,
+    yearly: yearly, yearReview: yearReview, taxYearStart: taxYearStart,
     summary: summary, shareOf: shareOf, amountAt: amountAt, setting: setting, partnerOf: partnerOf, mainOf: mainOf, fallbackOf: fallbackOf,
     accountsOf: accountsOf, accName: accName, person: person, startOf: startOf, moveDate: moveDate, budgetsOf: budgetsOf, budgetsIn: budgetsOf, reimbursements: reimbursements, startBalances: startBalances,
     money: money, nice: nice, describe: describe, addDays: addDays, diff: diff, parseDate: parseDate, isIso: isIso, round: round

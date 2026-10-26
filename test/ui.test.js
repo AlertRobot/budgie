@@ -58,7 +58,7 @@ const T = s => (s || "").replace(/\s+/g, " ").trim();
   await visitAll(page, "ethan");
   // log a payment from the main account for fuel
   await page.click('nav [data-v="add"]');
-  await page.click('[data-a="addpick"][data-v="budget:e-fuel"]'); await page.click('[data-a="addpick"][data-v="account:e-main"]');
+  await page.click('[data-a="addbud"][data-v="e-fuel"]'); await page.click('[data-a="addfrom"]'); await page.click('#sheets [data-a="addfrom2"][data-v="e-main"]');
   await page.fill("#addAmt", "35");
   await page.click('[data-a="addsave"]'); await page.waitForTimeout(1200);
   console.log("after log:", T(await page.textContent("#toast")), "|", T(await page.textContent("main")).slice(0, 400));

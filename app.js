@@ -114,6 +114,7 @@
       var upgraded = !!(j.engine && S.data.serverEngine !== j.engine && !j.full); if (j.engine) S.data.serverEngine = j.engine;
       persist(); dirty(); S.lastSync = Date.now(); S.lastError = "";
       applyPersonPrefs();
+      if (!S.bank && !S.bankAsked) { S.bankAsked = true; setTimeout(bankRefresh, 300); }
       if (S.data.queue.length || ((rej.length || upgraded) && !j.full)) setTimeout(function () { sync((rej.length || upgraded) && !j.full); }, 60); // a full refresh puts back the sheet's copy of anything turned down
     } catch (e) { S.lastError = navigator.onLine === false ? "Offline: changes will sync when you're back online" : String(e && e.message || e); }
     finally { S.syncing = false; render(true); }
@@ -225,6 +226,8 @@
     checks: function () { return ["Things to check", fromTitle()]; },
     edit: function () { return [S.view.p.title || "Edit", fromTitle()]; }, list: function () { return [S.view.p.title || "", fromTitle()]; }, themes: function () { return ["Themes", "How Budgie looks"]; },
     payments: function () { var d = db(), pp = S.view.p, b = pp.budget ? d.byId[pp.budget] : null, per = B.periodAt(d, me(), pp.start || todayIso()); return ["Payments", (b ? b.name.replace(/ \(what's left\)/, "") + " · " : "") + per.name]; },
+    emailset: function () { return ["Sunday email", "Settings"]; },
+    bank: function () { return ["Bank connection", "Settings"]; }, review: function () { return ["New payments", "From " + bankName()]; },
     sharing: function () { return ["Partner and sharing", "What " + (person(partner()).name || "your partner") + " sees"]; }, sync: function () { return ["Google Sheet", "Sync and backup"]; }, importcsv: function () { return ["Import", "Bank statement"]; },
     connect: function () { return ["Budgie", "Connect your sheet"]; }
   };
@@ -300,6 +303,9 @@
     var items = t.todo, payItems = items.filter(function (x) { return x.payday; }), rest = items.filter(function (x) { return !x.payday; });
     last.todo = rest;
     var rows = "";
+    var reN = reviewRows().length;
+    if (reN) rows += li(reN + " new payment" + (reN === 1 ? "" : "s") + " from " + esc(bankName()), "Check what " + (reN === 1 ? "it was" : "they were") + " for", "", "go", "review");
+    if (S.bank && S.bank.reapproveBy && B.diff(todayIso(), String(S.bank.reapproveBy).slice(0, 10)) <= 7) rows += li("Approve Budgie again in the Monzo app", "Monzo asks every 90 days. Do it by " + esc(B.nice(String(S.bank.reapproveBy).slice(0, 10))), "", "go", "bank");
     if (payItems.length) rows += li("Sort your pay into " + esc(potWord(true)), payItems.length + " " + esc(payItems.length === 1 ? potWord() : potWord(true)) + " still to move", "", "go", "payday");
     rest.forEach(function (it, i) {
       var right = num(it.type === "warn" ? "" : M(it.amount));
@@ -308,7 +314,8 @@
       else if (it.info) rows += '<div class="li"><span class="grow"><span class="what">' + esc(it.what) + '</span><span class="why">' + why + '</span></span><button type="button" class="btn ghost sm" data-a="tick" data-v="' + i + '">I\'ve paid</button></div>';
       else rows += '<label class="li" style="cursor:pointer"><input type="checkbox" class="tick" data-c="tick" data-v="' + i + '" aria-label="Done: ' + esc(it.what) + '"><span class="grow"><span class="what">' + esc(it.what) + '</span><span class="why">' + why + "</span></span>" + right + "</label>";
     });
-    html += card('<div class="row"><h2>To do</h2><span class="small muted">' + (items.length ? (rest.length + (payItems.length ? 1 : 0)) + " left" : "") + "</span></div>" + (rows ? '<div class="list">' + rows + "</div>" : '<p class="muted" style="margin:8px 0 0">All done. Everything is where it should be.</p>'));
+    var leftN = rest.length + (payItems.length ? 1 : 0) + (reN ? 1 : 0);
+    html += card('<div class="row"><h2>To do</h2><span class="small muted">' + (leftN ? leftN + " left" : "") + "</span></div>" + (rows ? '<div class="list">' + rows + "</div>" : '<p class="muted" style="margin:8px 0 0">All done. Everything is where it should be.</p>'));
     // tiles
     if (t.tiles.length) {
       html += '<h2 class="h2">' + (isEasy() ? "What you can spend" : "Each day until payday") + '</h2><div class="grid2">';
@@ -387,42 +394,74 @@
   }
 
   // ----- Add
+  // Logging a payment should take a few seconds: type the amount, tap what it was for, log it. Everything else
+  // (where it came from, the date, splitting, a note) is worked out and shown as one line you only touch if it's wrong.
+  var BUD_ICON = [[/food|grocer|shop/i, "basket"], [/fuel|petrol|car|travel|train|bus/i, "car"], [/fun|spend|entertain|treat|going out/i, "spark"], [/house|home/i, "house"], [/gift|birthday|christmas/i, "gift"], [/health|gym|beauty/i, "heart"], [/eat|takeaway|lunch|coffee/i, "cup"]];
+  ICON.basket = '<path d="M4 9h16l-1.6 9.2a2 2 0 0 1-2 1.8H7.6a2 2 0 0 1-2-1.8z"/><path d="M8.5 9l3.5-5 3.5 5"/>';
+  ICON.car = '<path d="M3 15v-3l2-5h9l4 5h2a1 1 0 0 1 1 1v2h-2"/><path d="M8 15h7"/><circle cx="6" cy="16" r="2"/><circle cx="17" cy="16" r="2"/><path d="M5.5 12h12"/>';
+  ICON.heart = '<path d="M12 20s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.5-7 10-7 10z"/>';
+  ICON.cup = '<path d="M5 8h11v5a5 5 0 0 1-5 5h-1a5 5 0 0 1-5-5z"/><path d="M16 10h2a2 2 0 0 1 0 4h-2"/>';
+  ICON.tag = '<path d="M4 4h7l9 9-7 7-9-9z"/><circle cx="8" cy="8" r="1.5"/>';
+  function budIcon(name) { var m = BUD_ICON.filter(function (x) { return x[0].test(name); })[0]; return m ? m[1] : "tag"; }
+  var budName = function (b) { return String(b.name || "").replace(/ \(what's left\)/, ""); };
+  // the budgets you use most come first; the rest are one tap away
+  function addBudgets(date) {
+    var d = db(), p = me(), buds = spendBudgets(date), since = B.addDays(todayIso(), -90), use = {};
+    d.transactions.forEach(function (x) { if (x.person === p && x.date >= since && x.budget) use[x.budget] = (use[x.budget] || 0) + 1; });
+    return buds.map(function (b, i) { return {b: b, i: i, n: use[b.id] || 0}; }).sort(function (x, y) { return y.n - x.n || x.i - y.i; }).map(function (x) { return x.b; });
+  }
+  // where a payment for this budget usually comes from, and whether it's usually split
+  function addDefaults(budId) {
+    var d = db(), p = me(), b = d.byId[budId] || {}, acc = d.byId[b.account], recent = d.transactions.filter(function (x) { return x.person === p && x.budget === budId && x.source !== "import"; }).sort(function (x, y) { return x.date < y.date ? 1 : -1; }).slice(0, 5);
+    var from = acc && /main|pot|saving|credit/.test(acc.kind || "pot") && acc.owner === p ? acc.id : B.mainOf(d, p);
+    var counts = {}; recent.forEach(function (x) { if (x.account) counts[x.account] = (counts[x.account] || 0) + 1; });
+    var top = Object.keys(counts).sort(function (x, y) { return counts[y] - counts[x]; })[0]; if (top && counts[top] >= 2 && d.byId[top]) from = top;
+    var splitN = recent.filter(function (x) { return x.split; }).length, lastSplit = (recent.filter(function (x) { return x.split; })[0] || {}).split;
+    return {account: from, split: !!partner() && recent.length >= 2 && splitN * 2 > recent.length, splitId: lastSplit || "half"};
+  }
   SCREENS.add = function () {
-    var a = S.ui.add, d = db(), p = me(), mode = a.mode || "spend";
-    var aper = B.periodAt(d, p, a.date || todayIso());
-    // only budgets running in the pay period of the date being logged (Christmas money shows from late November)
-    var buds = spendBudgets(a.date || todayIso());
-    if ((!a.budget || !buds.some(function (b) { return b.id === a.budget; })) && buds[0]) a.budget = buds[0].id;
-    var accs = B.accountsOf(d, p).filter(function (x) { return /main|pot|saving|credit/.test(x.kind || "pot"); });
-    if (!a.account) a.account = B.mainOf(d, p);
-    var html = '<div class="seg" role="group" aria-label="What to add"><button type="button" data-a="addmode" data-v="spend" aria-pressed="' + (mode === "spend") + '">A payment</button><button type="button" data-a="addmode" data-v="bill" aria-pressed="' + (mode === "bill") + '">A bill came in</button></div>';
-    // the amount: tap it and the phone's number keyboard comes up
-    html += '<label class="amount-in" style="margin-top:14px"><span class="sr">Amount</span><span class="cur" aria-hidden="true">£</span><input id="addAmt" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" placeholder="0.00" data-c="addamt" value="' + esc(S.ui.keys || "") + '"></label>' +
-      '<div class="tiny muted" style="text-align:center;margin-top:2px">Tap the amount to type it</div>';
-    if (mode === "bill") {
-      // bills that change (energy, water) first; nothing picked until you choose, so the rent can't be overwritten by accident
-      var myBills = d.bills.filter(function (b) { return b.person === p; }).sort(function (x, y) { return (y.variable === true || /^true$/i.test(String(y.variable)) ? 1 : 0) - (x.variable === true || /^true$/i.test(String(x.variable)) ? 1 : 0); });
-      var varBills = myBills.filter(function (b) { return b.variable === true || /^true$/i.test(String(b.variable)); }), showAll = S.ui.add.allBills || !varBills.length, shown = showAll ? myBills : varBills;
-      if (a.bill && !shown.some(function (b) { return b.id === a.bill; })) a.bill = "";
-      html += '<div class="small muted" style="text-align:center;margin-top:10px">The real amount of a bill that changes, like energy. It replaces the estimate and re-splits it.</div>';
-      if (!myBills.length) return html + '<p class="empty">You don\'t have any bills yet.</p><button type="button" class="btn dash" data-a="new" data-v="bills">Add a bill</button>';
-      html += '<div style="font-weight:700;margin:12px 4px 6px">Which bill</div><div class="chips">' + shown.map(function (b) { return '<button type="button" class="chip" data-a="addpick" data-v="bill:' + esc(b.id) + '" aria-pressed="' + (a.bill === b.id) + '">' + esc(b.name) + "</button>"; }).join("") +
-        (!showAll ? '<button type="button" class="chip" data-a="addallbills" style="border-style:dashed">Another bill…</button>' : "") + "</div>";
-    } else {
-      if (!buds.length) return html + card('<h2>Set up a budget first</h2><p class="muted small">Budgie needs at least one budget (like Food or Fun) to log a payment against.</p><button type="button" class="btn wide" data-a="new" data-v="budgets">Add a budget</button>');
-      html += '<div style="font-weight:700;margin:12px 4px 6px">What for</div><div class="chips">' + buds.map(function (b) { return '<button type="button" class="chip" data-a="addpick" data-v="budget:' + esc(b.id) + '" aria-pressed="' + (a.budget === b.id) + '">' + esc(b.name.replace(/ \(what's left\)/, "")) + "</button>"; }).join("") + "</div>";
-      html += '<div style="font-weight:700;margin:12px 4px 6px">Paid from</div><div class="chips">' + accs.map(function (x) { return '<button type="button" class="chip" data-a="addpick" data-v="account:' + esc(x.id) + '" aria-pressed="' + (a.account === x.id) + '">' + esc(x.name) + "</button>"; }).join("") + "</div>";
-      if (partner()) {
-        // only splits in parts (like half each, or 2 to 1) make sense for a single payment
-        var splits = d.splits.filter(function (s) { return !/=/.test(String(s.shares || "")); });
-        html += '<label class="check" style="padding-bottom:0"><input type="checkbox" data-c="addsplit"' + (a.split ? " checked" : "") + ">Split with " + esc(person(partner()).name || "partner") + "</label>";
-        if (a.split && splits.length) html += '<div class="chips" style="margin-top:6px">' + [{id: "half", name: "Half each"}].concat(splits.filter(function (s) { return s.id !== "half"; })).map(function (s) { return '<button type="button" class="chip" data-a="addpick" data-v="splitid:' + esc(s.id) + '" aria-pressed="' + ((a.splitId || "half") === s.id) + '">' + esc(s.name) + (s.shares ? ' <span class="tiny" style="opacity:.8">' + esc(describeShares(s.shares)) + "</span>" : "") + "</button>"; }).join("") + "</div>";
-      }
-    }
-    html += '<div class="two"><label class="f">Date<input type="date" data-c="adddate" value="' + esc(a.date || todayIso()) + '"></label><label class="f">Note<input type="text" data-c="addnote" value="' + esc(a.note || "") + '" placeholder="Optional"></label></div>';
-    html += '<button type="button" class="btn wide" style="margin-top:14px;min-height:54px;font-size:17px" data-a="addsave">' + (mode === "bill" ? "Save the bill" : "Log it") + "</button>";
+    var a = S.ui.add, d = db(), p = me(), mode = a.mode || "spend", date = a.date || todayIso();
+    var amount = '<label class="amount-in"><span class="sr">Amount</span><span class="cur" aria-hidden="true">£</span><input id="addAmt" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" placeholder="0.00" data-c="addamt" value="' + esc(S.ui.keys || "") + '"></label>';
+    if (mode === "bill") return addBillScreen(amount);
+    var buds = addBudgets(date);
+    if (!buds.length) return amount + card('<h2>Set up a budget first</h2><p class="muted small">Budgie needs at least one budget (like Food or Fun) to log a payment against.</p><button type="button" class="btn wide" data-a="new" data-v="budgets">Add a budget</button>');
+    if (!a.budget || !buds.some(function (b) { return b.id === a.budget; })) { a.budget = buds[0].id; a.touched = {}; }
+    a.touched = a.touched || {};
+    var def = addDefaults(a.budget);
+    if (!a.touched.account) a.account = def.account;
+    if (!a.touched.split) { a.split = def.split; a.splitId = def.splitId; }
+    var shownN = buds.length <= 6 ? buds.length : 5, shown = buds.slice(0, shownN);
+    if (buds.indexOf(d.byId[a.budget]) >= shownN) shown[shownN - 1] = d.byId[a.budget]; // keep the chosen one in view
+    var html = amount + '<div class="budgrid' + (shown.length + (buds.length > shownN ? 1 : 0) <= 4 ? " two" : "") + '" role="group" aria-label="What for">' + shown.map(function (b) {
+      return '<button type="button" class="budtile" data-a="addbud" data-v="' + esc(b.id) + '" aria-pressed="' + (a.budget === b.id) + '">' + icon(budIcon(b.name), 22) + "<span>" + esc(budName(b)) + "</span></button>";
+    }).join("") + (buds.length > shownN ? '<button type="button" class="budtile more" data-a="addmorebud">' + icon("grid", 22) + "<span>More</span></button>" : "") + "</div>";
+    // the details, as one line of things you can tap
+    var q = person(partner()).name || "partner", accName = B.accName(d, a.account);
+    var bits = ['<button type="button" class="detail" data-a="addfrom">' + "From " + esc(accName) + "</button>",
+      '<button type="button" class="detail" data-a="adddatepick">' + esc(date === todayIso() ? "Today" : date === B.addDays(todayIso(), -1) ? "Yesterday" : B.nice(date)) + "</button>"];
+    if (partner()) bits.push('<button type="button" class="detail' + (a.split ? " on" : "") + '" data-a="addsplit2" aria-pressed="' + !!a.split + '">' + (a.split ? "Split with " + esc(q) : "Not split") + "</button>");
+    bits.push('<button type="button" class="detail" data-a="addnotepick">' + (a.note ? "“" + esc(a.note.length > 18 ? a.note.slice(0, 17) + "…" : a.note) + "”" : "Add a note") + "</button>");
+    html += '<div class="details">' + bits.join("") + "</div>";
+    html += '<button type="button" class="btn wide logit" data-a="addsave">Log it</button>';
+    html += '<p style="text-align:center;margin:14px 0 0"><button type="button" class="linkbtn" data-a="addmode" data-v="bill">A bill came in? Log its real amount</button></p>';
     return html;
   };
+  function addBillScreen(amount) {
+    var a = S.ui.add, d = db(), p = me();
+    // bills that change (energy, water) first; nothing picked until you choose, so the rent can't be overwritten by accident
+    var isVar = function (b) { return b.variable === true || /^true$/i.test(String(b.variable)); };
+    var myBills = d.bills.filter(function (b) { return b.person === p; }).sort(function (x, y) { return (isVar(y) ? 1 : 0) - (isVar(x) ? 1 : 0); });
+    var varBills = myBills.filter(isVar), showAll = a.allBills || !varBills.length, shown = showAll ? myBills : varBills;
+    if (a.bill && !shown.some(function (b) { return b.id === a.bill; })) a.bill = "";
+    var html = '<p class="small muted" style="margin:0 4px 10px">The real amount of a bill that changes, like energy. It replaces the estimate (and re-splits it if it\'s shared).</p>' + amount;
+    if (!myBills.length) return html + '<p class="empty">You don\'t have any bills yet.</p><button type="button" class="btn dash" data-a="new" data-v="bills">Add a bill</button>';
+    html += '<div style="font-weight:700;margin:14px 4px 8px">Which bill</div><div class="chips">' + shown.map(function (b) { return '<button type="button" class="chip" data-a="addpick" data-v="bill:' + esc(b.id) + '" aria-pressed="' + (a.bill === b.id) + '">' + esc(b.name) + "</button>"; }).join("") +
+      (!showAll ? '<button type="button" class="chip" data-a="addallbills" style="border-style:dashed">Another bill…</button>' : "") + "</div>";
+    html += '<div class="details" style="margin-top:12px"><button type="button" class="detail" data-a="adddatepick">' + esc((a.date || todayIso()) === todayIso() ? "Today" : B.nice(a.date)) + "</button></div>";
+    html += '<button type="button" class="btn wide logit" data-a="addsave">Save the bill</button>';
+    html += '<p style="text-align:center;margin:14px 0 0"><button type="button" class="linkbtn" data-a="addmode" data-v="spend">Back to logging a payment</button></p>';
+    return html;
+  }
 
   // ----- Partner
   SCREENS.partner = function () {
@@ -565,6 +604,14 @@
     html += card('<div class="list">' + mine.map(function (b) { return li(esc(b.name) + (b.split ? ' <span class="tiny muted">shared</span>' : ""), esc(B.describe(b)) + " · next " + esc(nextOf(b)), num(M(B.amountAt(d, b, now))), "edit", "bills:" + b.id); }).join("") + "</div>" +
       (subs ? '<div class="row" style="padding-top:10px;border-top:1px solid var(--line2);font-weight:700"><span>Subscriptions over a year</span>' + num(M0(subs)) + "</div>" : ""), "flush");
     html += '<button type="button" class="btn dash" data-a="new" data-v="bills">Add a bill</button>';
+    var yr = B.yearly ? B.yearly(d, p, now) : [];
+    if (yr.length) {
+      var perMonth = yr.reduce(function (t, y) { return t + (+y.monthly || 0); }, 0);
+      html += '<h2 class="h2">Yearly costs</h2>' + card('<p class="small muted" style="margin:0 0 6px">Budgie puts a bit by each payday so these are covered when they come. ' + M(perMonth) + " this month in all.</p>" + '<div class="list">' + yr.map(function (y) {
+        var pct = y.amount ? Math.min(100, (+y.saved || 0) / y.amount * 100) : 0;
+        return '<button type="button" class="li" data-a="edit" data-v="bills:' + esc(y.id) + '" style="display:block"><div class="row"><span class="what">' + esc(y.name) + "</span>" + num(M(y.amount)) + '</div><div class="small muted">' + (y.next ? "Next " + esc(B.nice(y.next)) + " · " : "") + M(y.monthly) + " this month · " + M(y.saved) + " put by" + (y.onTrack === false ? ' · <span class="warn">behind</span>' : "") + '</div><div style="margin-top:6px">' + bar(pct) + "</div></button>";
+      }).join("") + "</div>", "flush");
+    }
     var tr = d.transfers.filter(function (t) { return t.from === p; });
     if (tr.length) html += '<h2 class="h2">You pay ' + esc(person(partner()).name || "") + "</h2>" + card('<div class="list">' + tr.map(function (t) { return li(esc(t.name), esc(B.describe(t)) + " · next " + esc(nextOf(t)), num(M(B.amountAt(d, t, now))), "edit", "transfers:" + t.id); }).join("") + "</div>", "flush");
     return html;
@@ -688,6 +735,7 @@
       html += card('<div class="small muted">' + whose + " Lifetime ISA</div>" + '<div class="row" style="align-items:center"><span style="font-size:32px;font-weight:800;font-family:var(--head)">' + M0(value) + "</span>" + (a.owner === me() ? '<button type="button" class="btn ghost sm" data-a="potcheck" data-v="' + esc(a.id) + '">Update</button>' : "") + "</div>" +
         (sub ? '<div class="tiny muted">' + sub + "</div>" : "") + chartHtml + holdHtml +
         (L.bonusReceived || L.feesThisYear ? '<div class="small muted" style="margin-top:10px">This tax year: ' + M(L.bonusReceived) + " bonus received · " + M(L.feesThisYear) + " fees</div>" : "") +
+        (L.expectedBonus && L.expectedBonus.length ? '<div class="small" style="margin-top:6px">Bonus on its way: about <b>' + M(L.expectedBonusTotal || L.expectedBonus.reduce(function (t, x) { return t + x.amount; }, 0)) + "</b>" + (L.expectedBonus[0].due ? ", the first by " + esc(B.nice(L.expectedBonus[0].due)) : "") + ". Moneybox claims it for you.</div>" : "") +
         '<div style="margin-top:12px"><div class="row small"><span style="font-weight:600">This tax year (6 Apr to 5 Apr)</span><span class="num">' + M0(L.paidThisYear) + " of £4,000</span></div>" + '<div style="margin-top:6px">' + bar(L.paidThisYear / 40) + '</div><div class="small muted" style="margin-top:4px">' + M0(L.allowanceLeft) + " left you can pay in · bonus on this year's payments about " + M(L.bonusThisYear) + "</div>" +
         (L.planned ? '<div class="small" style="margin-top:8px">On course for ' + M0(L.onCourse) + " by 5 April" + (L.overBy ? '. <span class="warn">That\'s ' + M(L.overBy) + " over the £4,000 limit, and your provider turns away anything over it. Pay in a little less before then.</span>" : L.onCourse >= 3999.5 ? '. <span class="good">That\'s the full £1,000 bonus.</span>' : ".") + "</div>" : "") +
         (a.owner === me() && (L.paidBefore || !Mo.flows.length) ? '<button type="button" class="btn ghost sm" style="margin-top:8px" data-a="lisapaid" data-v="' + esc(a.id) + '">' + (L.paidBefore ? "Paid in before Budgie: " + M0(L.paidBefore) : "Add what you paid in before Budgie") + "</button>" : "") + "</div>");
@@ -808,15 +856,15 @@
   // ----- Settings
   SCREENS.settings = function () {
     var w = cap(potWord(true)), todo = checkList(), groups = [
-      ["You", [["list:income", "Pay and money coming in", "Paydays, pay rises, one-offs"], ["account", "Your account", (person().name || "") + " · " + (person().bank || "")]]],
+      ["You", [["list:income", "Pay and money coming in", "Paydays, pay rises, one-offs"], ["account", "Your account", (person().name || "") + " · " + (person().bank || "")], ["bank", "Bank connection", bankLabel()], ["emailset", "Sunday money email", /^true$/i.test(String(getSetting("email.sunday", ""))) ? "On: to " + getSetting("email.to", "") : "A weekly round-up in your inbox"]]],
       ["Your money", [["bills", "Bills and subscriptions", "Add, change or stop a bill"], ["list:budgets", "Budgets", "Food, fun and the rest"], ["list:accounts", w, "What each one is for"], ["goals", "Goals", "House, car, holidays"], ["gifts", "Gifts", "Ideas and spending"]]],
       ["Together", [["sharing", "Partner and sharing", "What " + (person(partner()).name || "your partner") + " can see"], ["list:splits", "How you split things", "For example 2 parts to 1"], ["list:transfers", "Regular payments to " + (person(partner()).name || "partner"), "Like your rent share"], ["debts", "Money owed between you", "Furniture and the like"]]],
-      ["App", [["themes", "Themes", themeLabel()], ["toggle:easy", "Easy read", isEasy() ? "On: simpler screens in an easy-to-read font" : "Simpler screens in an easy-to-read font"], ["toggle:hide", "Hide amounts", S.prefs.hide ? "On: tap the eye to peek" : "Cover numbers with £••••"], ["toggle:demo", "Show and tell", demoOn() ? "On: sample data" : "Show the app off with made-up money"], ["sync", "Google Sheet and sync", demoOn() ? "Not used in Show and tell" : syncLabel()], ["importcsv", "Import a bank statement", "Add payments from a CSV file"]]]
+      ["App", [["themes", "Themes", themeLabel()], ["toggle:easy", "Easy read", isEasy() ? "On: simpler screens in an easy-to-read font" : "Simpler screens in an easy-to-read font"], ["toggle:lock", "Fingerprint lock", lockOn() ? "On: Budgie checks it's you when you open it" : "Check it's you before showing anything"], ["toggle:hide", "Hide amounts", S.prefs.hide ? "On: tap the eye to peek" : "Cover numbers with £••••"], ["toggle:demo", "Show and tell", demoOn() ? "On: sample data" : "Show the app off with made-up money"], ["sync", "Google Sheet and sync", demoOn() ? "Not used in Show and tell" : syncLabel()], ["importcsv", "Import a bank statement", "Add payments from a CSV file"]]]
     ];
     if (todo.length) groups.unshift(["To check", [["checks", todo.length + " thing" + (todo.length === 1 ? "" : "s") + " Budgie guessed", "Confirm or change them"]]]);
     return groups.map(function (g) {
       return '<div class="secthead">' + esc(g[0]) + "</div>" + card('<div class="list">' + g[1].map(function (it) {
-        if (/^toggle:/.test(it[0])) { var k = it[0].slice(7), on = k === "easy" ? isEasy() : k === "hide" ? S.prefs.hide : demoOn(); return '<label class="li check" style="padding:12px 0"><span class="grow"><span class="what">' + esc(it[1]) + '</span><span class="why">' + esc(it[2]) + '</span></span><input type="checkbox" data-c="toggle" data-v="' + k + '"' + (on ? " checked" : "") + "></label>"; }
+        if (/^toggle:/.test(it[0])) { var k = it[0].slice(7), on = k === "easy" ? isEasy() : k === "hide" ? S.prefs.hide : k === "lock" ? lockOn() : demoOn(); return '<label class="li check" style="padding:12px 0"><span class="grow"><span class="what">' + esc(it[1]) + '</span><span class="why">' + esc(it[2]) + '</span></span><input type="checkbox" data-c="toggle" data-v="' + k + '"' + (on ? " checked" : "") + "></label>"; }
         return li(esc(it[1]), esc(it[2]), "", "go", it[0]);
       }).join("") + "</div>", "flush");
     }).join("") + '<p class="tiny muted" style="text-align:center;margin:18px 0">Budgie ' + APP_VERSION + " · engine " + B.VERSION + " · Google Calendar coming soon</p>";
@@ -835,6 +883,80 @@
     return html;
   };
 
+  // ----- Bank connection (read-only: balances, payments, pots or Spaces)
+  async function bankCall(action, extra) {
+    if (demoOn() || !S.cfg) throw new Error("Not connected to your sheet");
+    var res = await fetch(S.cfg.u, {method: "POST", headers: {"Content-Type": "text/plain;charset=utf-8"}, body: JSON.stringify(Object.assign({key: S.cfg.k, action: action}, extra || {}))});
+    var j = await res.json(); if (!j.ok) throw new Error(j.error || "The sheet said no");
+    return j;
+  }
+  function bankRefresh() { return bankCall("bank.status").then(function (j) { S.bank = j.bank || {}; S.bank.at = Date.now(); render(true); return S.bank; }, function (e) { S.bank = Object.assign(S.bank || {}, {err: e.message}); render(true); }); }
+  function bankName() { var b = (S.bank && S.bank.provider) || (/starling/i.test(person().bank || "") ? "starling" : "monzo"); return b === "starling" ? "Starling" : "Monzo"; }
+  function bankLabel() { var b = S.bank; if (demoOn()) return "Not used in Show and tell"; if (!b || !b.provider) return "Payments and balances from " + (person().bank || "your bank") + ", read-only"; if (b.needsReconnect) return bankName() + ": needs reconnecting"; return bankName() + (b.connected ? ": connected" + (b.lastSync ? ", checked " + ago(b.lastSync) : "") : ": not finished setting up"); }
+  function reviewRows() { var p = me(); return (tables().transactions || []).filter(function (x) { return x.person === p && !x.deleted && (x.review === true || /^true$/i.test(String(x.review))); }).sort(function (a, b) { return a.date < b.date ? 1 : -1; }); }
+  SCREENS.bank = function () {
+    if (demoOn()) return card("<p>Show and tell is on, so there's no bank to connect.</p>");
+    var b = S.bank, name = person().bank || "your bank", isStarling = /starling/i.test(name) || (b && b.provider === "starling");
+    if (!b) { bankRefresh(); return '<p class="empty">Checking…</p>'; }
+    var safety = '<div class="banner small"><b>Read-only.</b> Budgie only reads your balances, payments and ' + (isStarling ? "Spaces" : "pots") + ". It can't move or send money. Your " + (isStarling ? "key" : "sign-in") + " is kept inside your Google Sheet's script, never on this phone or anywhere else, and you can switch it off at any time" + (isStarling ? " by deleting the key on Starling's developer site." : " by disconnecting here or in the Monzo app.") + "</div>";
+    if (b.err && !b.provider) return card('<p class="bad small">' + esc(b.err) + '</p><button type="button" class="btn ghost sm" data-a="bankre">Try again</button>');
+    if (!b.connected) {
+      var url = esc((S.cfg || {}).u || "");
+      if (isStarling) return safety + card('<h2>Connect Starling</h2><ol class="steps">' +
+        '<li>On a computer or your phone\'s browser, go to <b>developer.starlingbank.com</b> and sign up with the email you use for Starling.</li>' +
+        '<li>Open <b>Personal access</b>, link your account and approve it in the Starling app.</li>' +
+        '<li>Create a <b>personal access token</b>. Tick only these: <b>account:read</b>, <b>balance:read</b>, <b>transaction:read</b> and <b>savings-goal:read</b> (and <b>space:read</b> if you see it). Nothing else. Budgie turns away a key that could move money.</li>' +
+        '<li>Copy the token and paste it here.</li></ol>' +
+        '<label class="f">Your token<input type="password" id="stTok" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste it here"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="bankstarling">Connect</button><p class="tiny muted" style="margin:8px 0 0">The token goes straight to your Google Sheet\'s script and is never shown again.</p>');
+      return safety + card('<h2>Connect Monzo</h2><ol class="steps">' +
+        '<li>Go to <b>developers.monzo.com</b> and sign in with your Monzo email, then approve it in the Monzo app.</li>' +
+        '<li>Open <b>Clients</b> and make a <b>New OAuth Client</b>. Name: Budgie. Logo: leave empty. Redirect URL: <span class="copy">' + url + '</span> <button type="button" class="linkbtn" data-a="bankcopy">Copy</button>. Confidentiality: <b>Confidential</b>.</li>' +
+        '<li>Copy the <b>Client ID</b> and <b>Client secret</b> into the boxes below and tap Connect.</li>' +
+        '<li>Monzo opens: sign in, then approve Budgie in the Monzo app. Budgie fetches your history straight away.</li></ol>' +
+        '<label class="f">Client ID<input type="text" id="mzId" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="f">Client secret<input type="password" id="mzSecret" autocomplete="off" autocapitalize="off" spellcheck="false"></label>' +
+        '<button type="button" class="btn wide" style="margin-top:12px" data-a="bankmonzo">Connect Monzo</button><p class="tiny muted" style="margin:8px 0 0">Every 90 days Monzo asks you to approve Budgie again in the Monzo app. Budgie reminds you a week before.</p>');
+    }
+    var d = db(), accs = B.accountsOf(d, me());
+    var rows = (b.accounts || []).map(function (x) {
+      return '<div class="li" style="flex-wrap:wrap;gap:6px"><span class="grow" style="min-width:140px"><span class="what">' + esc(x.name) + '</span><span class="why">' + esc(({main: "Main account", pot: "Pot", space: "Space", credit: "Credit"})[x.kind] || "") + (x.balance !== undefined ? " · " + M(x.balance) : "") + "</span></span>" +
+        '<select data-c="bankmap" data-v="' + esc(x.extId) + '" aria-label="Which Budgie account is ' + esc(x.name) + '" style="min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);padding:0 8px;max-width:100%"><option value="">Ignore it</option>' + accs.map(function (a) { return '<option value="' + esc(a.id) + '"' + (x.mappedTo === a.id ? " selected" : "") + ">" + esc(a.name) + "</option>"; }).join("") + "</select></div>";
+    }).join("");
+    var reN = reviewRows().length;
+    return card('<div class="row"><h2>' + esc(bankName()) + '</h2><span class="small ' + (b.needsReconnect ? "bad" : "good") + '" style="font-weight:700">' + (b.needsReconnect ? "Needs reconnecting" : "Connected") + "</span></div>" +
+        '<div class="small muted">' + (b.lastSync ? "Last checked " + esc(ago(b.lastSync)) + ". " : "") + "Budgie checks every 15 minutes." + (b.reapproveBy ? " Approve it again in the Monzo app by " + esc(B.nice(String(b.reapproveBy).slice(0, 10))) + "." : "") + "</div>" +
+        (b.lastError ? '<p class="small bad">' + esc(b.lastError) + "</p>" : "") +
+        (reN ? '<button type="button" class="btn wide" style="margin-top:12px" data-a="go" data-v="review">Check ' + reN + " new payment" + (reN === 1 ? "" : "s") + "</button>" : "") +
+        '<div class="two" style="margin-top:12px"><button type="button" class="btn ghost" data-a="banksync">Check now</button>' + (b.needsReconnect && b.provider === "monzo" ? '<button type="button" class="btn" data-a="bankmonzo2">Reconnect</button>' : "") + "</div>") +
+      (rows ? '<h2 class="h2">Which is which</h2><p class="small muted" style="margin:-4px 4px 6px">Tell Budgie which of its accounts each one is. Moves between them tick off your payday list by themselves.</p>' + card('<div class="list">' + rows + "</div>", "flush") : "") +
+      safety + '<button type="button" class="btn danger wide" style="margin-top:14px" data-a="bankoff">Disconnect ' + esc(bankName()) + "</button>";
+  };
+  // new payments from the bank: check what they were for
+  SCREENS.review = function () {
+    var d = db(), list = reviewRows(), buds = spendBudgets(), q = person(partner()).name || "";
+    if (!list.length) return '<p class="empty">All checked. Nice.</p>';
+    var top = addBudgets(todayIso()).slice(0, 4);
+    return '<p class="small muted" style="margin:0 4px 10px">From ' + esc(bankName()) + ". Tap what each one was for. Budgie remembers, so next time it guesses right.</p>" + list.slice(0, 30).map(function (x) {
+      var opts = top.slice(); if (x.budget && !opts.some(function (b) { return b.id === x.budget; }) && d.byId[x.budget]) opts.unshift(d.byId[x.budget]);
+      return card('<div class="row"><span style="font-weight:700">' + esc(x.note || "Payment") + "</span>" + num(M(x.amount)) + '</div><div class="small muted">' + esc(B.nice(x.date)) + " · " + esc(B.accName(d, x.account)) + "</div>" +
+        '<div class="chips" style="margin-top:8px">' + opts.map(function (b) { return '<button type="button" class="chip" data-a="revbud" data-v="' + esc(x.id) + "|" + esc(b.id) + '" aria-pressed="' + (x.budget === b.id) + '">' + esc(budName(b)) + "</button>"; }).join("") +
+        (buds.length > opts.length ? '<button type="button" class="chip" style="border-style:dashed" data-a="revmore" data-v="' + esc(x.id) + '">Other…</button>' : "") + "</div>" +
+        '<div class="row" style="margin-top:8px;align-items:center">' + (partner() ? '<button type="button" class="detail' + (x.split ? " on" : "") + '" data-a="revsplit" data-v="' + esc(x.id) + '">' + (x.split ? "Split with " + esc(q) : "Not split") + "</button>" : "<span></span>") +
+        '<button type="button" class="btn sm" data-a="revok" data-v="' + esc(x.id) + '"' + (x.budget ? "" : " disabled") + ">Right</button></div>");
+    }).join("") + (list.some(function (x) { return x.budget; }) ? '<button type="button" class="btn ghost wide" style="margin-top:12px" data-a="revall">All the rest look right</button>' : "");
+  };
+  function merchantKey(name) { return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
+  function reviewSave(id, patch, learn) {
+    var x = (tables().transactions || []).filter(function (r) { return r.id === id; })[0]; if (!x) return;
+    var row = put("transactions", Object.assign({}, x, patch), true);
+    if (learn && row.budget && x.note) setting("bank.rule." + merchantKey(x.note), row.budget + (row.split ? "|" + row.split : ""));
+    return row;
+  }
+
+  SCREENS.emailset = function () {
+    var on = /^true$/i.test(String(getSetting("email.sunday", ""))), to = getSetting("email.to", "");
+    return '<p class="small muted" style="margin:0 4px 10px">Every Sunday evening: what you spent this week, what\'s left until payday, bills coming up and anything to sort. It only ever includes what you\'d see in the app. Once a year, just after 6 April, you also get your year in money.</p>' +
+      card('<label class="li check"><span class="grow"><span class="what">Send me the Sunday email</span></span><input type="checkbox" data-c="emailon"' + (on ? " checked" : "") + '></label><label class="f">Your email address<input type="email" id="emailTo" inputmode="email" autocomplete="email" value="' + esc(to) + '" placeholder="you@example.com"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="emailsave">Save</button>');
+  };
   SCREENS.sharing = function () {
     var keys = [["totals", "How much is left", "Your can-spend-today and what you're saving"], ["cats", "Your budgets", "Food, fun and the rest, against plan"], ["goals", "Your own goals", "Progress on goals that are just yours"], ["payments", "Each payment", "Every item you log, with notes"]];
     return '<p class="small muted" style="margin:0 4px 10px">Shared bills, split payments, money between you and joint goals are always shared. Gift lists never are.</p>' + card('<div class="list">' + keys.map(function (k) {
@@ -878,7 +1000,7 @@
 
   var SCHED = function () { return [{k: "unit", t: "how"}, {k: "start", t: "date", l: "Starts (or the first date)"}, {k: "end", t: "date", l: "Ends (leave empty for never)"}]; };
   var FORMS = {
-    bills: {title: "Bill", fields: function () { return [{k: "name", t: "text", l: "Name"}, {k: "amount", t: "money", l: "Amount"}].concat(SCHED()).concat([{k: "account", t: "account", l: "Comes out of"}, {k: "category", t: "select", l: "Type", o: [["home", "Home and flat bills"], ["subscription", "Subscription"], ["phone", "Phone"], ["car", "Car"], ["health", "Health"], ["work", "Work and fees"], ["insurance", "Insurance"], ["other", "Other"]]}, {k: "split", t: "split", l: "Shared with your partner?"}, {k: "variable", t: "check", l: "The amount changes each time (like energy)"}, {k: "notes", t: "text", l: "Notes"}]); }, owner: "person"},
+    bills: {title: "Bill", fields: function () { return [{k: "name", t: "text", l: "Name"}, {k: "amount", t: "money", l: "Amount"}].concat(SCHED()).concat([{k: "account", t: "account", l: "Comes out of"}, {k: "category", t: "select", l: "Type", o: [["home", "Home and flat bills"], ["subscription", "Subscription"], ["phone", "Phone"], ["car", "Car"], ["health", "Health"], ["work", "Work and fees"], ["insurance", "Insurance"], ["other", "Other"]]}, {k: "split", t: "split", l: "Shared with your partner?"}, {k: "variable", t: "check", l: "The amount changes each time (like energy)"}, {k: "setAside", t: "setaside"}, {k: "notes", t: "text", l: "Notes"}]); }, owner: "person"},
     income: {title: "Money coming in", fields: function () { return [{k: "name", t: "text", l: "Name"}, {k: "amount", t: "money", l: "Amount (after tax)"}].concat(SCHED()).concat([{k: "account", t: "account", l: "Goes into"}, {k: "isPay", t: "check", l: "This is my pay (it sets my pay periods)"}, {k: "notes", t: "text", l: "Notes"}]); }, owner: "person"},
     budgets: {title: "Budget", fields: function () { return [{k: "name", t: "text", l: "Name"}, {k: "amount", t: "money", l: "Amount each pay period (leave empty for whatever is left)"}, {k: "mode", t: "select", l: "How it works", o: [["daily", "Day to day: builds up each day"], ["weekly", "Weekly: paced week by week (good for food shops)"], ["oneoff", "One-offs: no daily pace"], ["saving", "Saving: moved on payday"], ["remainder", "Whatever is left after everything else"]]}, {k: "account", t: "account", l: "Kept in", all: true}, {k: "carry", t: "check", l: "Carry anything unspent into next month"}, {k: "start", t: "date", l: "Starts (optional)"}, {k: "end", t: "date", l: "Ends (optional)"}]; }, owner: "person"},
     accounts: {title: "Account", fields: function () { return [{k: "name", t: "text", l: "Name"}, {k: "kind", t: "select", l: "Kind", o: [["main", "Main account"], ["pot", "Pot or Space"], ["saving", "Savings pot"], ["isa", "ISA"], ["lisa", "Lifetime ISA"], ["pension", "Pension"], ["credit", "Credit card, Flex or overdraft"]]}, {k: "purpose", t: "text", l: "What it's for"}, {k: "fallback", t: "check", l: "Covers going over budget (only one should)"}, {k: "order", t: "number", l: "Order on screen"}]; }, owner: "owner"},
@@ -916,6 +1038,12 @@
       case "number": return input("number", ' inputmode="numeric"');
       case "money": return input("text", ' inputmode="decimal" placeholder="£"');
       case "date": return input("date");
+      case "setaside":
+        // only for bills that come round once a year or every few months
+        var rare = r.unit === "year" || r.unit === "once" ? r.unit === "year" : r.unit === "month" && +r.every >= 3;
+        if (!rare) return "";
+        var sa = !(r.setAside === false || /^false$/i.test(String(r.setAside)));
+        return '<label class="check"><input type="checkbox" data-f="setAside"' + (sa ? " checked" : "") + '>Put a bit by each month so it\'s there when it comes</label>';
       case "check": return '<label class="check"><input type="checkbox" data-f="' + f.k + '"' + (v === true || /^true$/i.test(String(v)) ? " checked" : "") + ">" + esc(f.l) + "</label>";
       case "select": return '<label class="f">' + esc(f.l) + '<select data-f="' + f.k + '">' + f.o.map(function (o) { return '<option value="' + o[0] + '"' + (String(v || f.o[0][0]) === o[0] ? " selected" : "") + ">" + esc(o[1]) + "</option>"; }).join("") + "</select></label>";
       case "account": var own = f.owner || me(); return '<label class="f">' + esc(f.l) + '<select data-f="' + f.k + '">' + (f.optional ? '<option value="">None</option>' : "") + accOptions(v || (f.optional ? "" : B.mainOf(db(), own)), own, f.all ? null : /main|pot|saving|credit|isa|lisa|pension/) + "</select></label>";
@@ -1065,7 +1193,8 @@
 
   // ---------- actions ----------
   var ACT = {
-    tab: function (v) { go(v); }, go: function (v) { if (/^list:/.test(v)) go("list", {table: v.slice(5)}); else go(v); }, back: back,
+    tab: function (v) { go(v); if (v === "add") { var el = $("#addAmt"); if (el && !el.value) try { el.focus({preventScroll: true}); } catch (e) {} } }, // Add goes straight to typing the amount
+    go: function (v) { if (/^list:/.test(v)) go("list", {table: v.slice(5)}); else go(v); }, back: back,
     sheetbg: function (v, el, e) { if (e.target === el) closeSheet(); }, sheetclose: function () { closeSheet(); },
     reveal: function () { S.ui.reveal = !S.ui.reveal; render(); },
     who: function () {
@@ -1140,12 +1269,37 @@
     editstop: function () { var stored = (tables()[EDIT.table] || []).filter(function (x) { return x.id === EDIT.id; })[0] || EDIT.orig; put(EDIT.table, Object.assign({}, stored, {end: todayIso()}), true); toast("Stopped from today"); leave(); },
     editdelete: function () { openSheet('<h2>Delete this?</h2><p class="muted">It will stop counting everywhere, including past months. To keep the past, use "Stop from today" instead.</p><button type="button" class="btn danger wide" data-a="editdelete2">Delete</button><button type="button" class="btn ghost wide" style="margin-top:10px" data-a="sheetclose">Keep it</button>'); },
     editdelete2: function () { del(EDIT.table, EDIT.id, true); toast("Deleted"); leave(); },
-    addmode: function (v) { S.ui.add.mode = v; render(); },
+    addmode: function (v) { S.ui.add.mode = v; render(); window.scrollTo(0, 0); },
+    addbud: function (v) { var a = S.ui.add; if (a.budget !== v) { a.budget = v; a.touched = {}; } closeSheet(); render(); },
+    addmorebud: function () {
+      var a = S.ui.add, buds = addBudgets(a.date || todayIso());
+      openSheet('<h2>What was it for?</h2><div class="budgrid" style="margin-top:12px">' + buds.map(function (b) { return '<button type="button" class="budtile" data-a="addbud" data-v="' + esc(b.id) + '" aria-pressed="' + (a.budget === b.id) + '">' + icon(budIcon(b.name), 22) + "<span>" + esc(budName(b)) + "</span></button>"; }).join("") + "</div>");
+    },
+    addfrom: function () {
+      var a = S.ui.add, d = db(), accs = B.accountsOf(d, me()).filter(function (x) { return /main|pot|saving|credit/.test(x.kind || "pot"); });
+      openSheet("<h2>Paid from</h2><div class=\"list\" style=\"margin-top:6px\">" + accs.map(function (x) { return '<button type="button" class="li" data-a="addfrom2" data-v="' + esc(x.id) + '"><span class="grow"><span class="what">' + esc(x.name) + "</span>" + (x.purpose ? '<span class="why">' + esc(x.purpose) + "</span>" : "") + "</span>" + (a.account === x.id ? '<span class="good" style="font-weight:700">✓</span>' : "") + "</button>"; }).join("") + "</div>");
+    },
+    addfrom2: function (v) { S.ui.add.account = v; S.ui.add.touched = Object.assign(S.ui.add.touched || {}, {account: true}); closeSheet(); render(); },
+    adddatepick: function () {
+      var t = todayIso(), cur = S.ui.add.date || t;
+      openSheet('<h2>When was it?</h2><div class="chips" style="margin-top:10px"><button type="button" class="chip" data-a="adddate2" data-v="' + t + '" aria-pressed="' + (cur === t) + '">Today</button><button type="button" class="chip" data-a="adddate2" data-v="' + B.addDays(t, -1) + '" aria-pressed="' + (cur === B.addDays(t, -1)) + '">Yesterday</button></div><label class="f">Another day<input type="date" id="addDateIn" value="' + esc(cur) + '" max="' + t + '"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="adddate2">Done</button>');
+    },
+    adddate2: function (v) { var x = v || (($("#addDateIn") || {}).value) || todayIso(); S.ui.add.date = x > todayIso() ? todayIso() : x; closeSheet(); render(); },
+    addsplit2: function () {
+      var a = S.ui.add, d = db(), splits = d.splits.filter(function (s) { return !/=/.test(String(s.shares || "")) && s.id !== "half"; });
+      a.touched = Object.assign(a.touched || {}, {split: true});
+      if (!splits.length || a.split) { a.split = !a.split; a.splitId = a.splitId || "half"; render(); return; }
+      openSheet("<h2>Split with " + esc(person(partner()).name || "your partner") + '</h2><div class="list" style="margin-top:6px">' + [{id: "half", name: "Half each"}].concat(splits).map(function (s) { return '<button type="button" class="li" data-a="addsplit3" data-v="' + esc(s.id) + '"><span class="grow"><span class="what">' + esc(s.name) + "</span>" + (s.shares ? '<span class="why">' + esc(describeShares(s.shares)) + "</span>" : "") + "</span></button>"; }).join("") + "</div>");
+    },
+    addsplit3: function (v) { S.ui.add.split = true; S.ui.add.splitId = v; closeSheet(); render(); },
+    addnotepick: function () { openSheet('<h2>Add a note</h2><label class="f">Note<input type="text" id="addNoteIn" value="' + esc(S.ui.add.note || "") + '" placeholder="For example: Tesco big shop" maxlength="80"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="addnote2">Done</button>'); },
+    addnote2: function () { S.ui.add.note = (($("#addNoteIn") || {}).value || "").trim(); closeSheet(); render(); },
     addpick: function (v) { var k = v.split(":"); S.ui.add[k[0]] = k[1]; render(); },
     addallbills: function () { S.ui.add.allBills = true; render(); },
     addsave: function () {
       var el = $("#addAmt"); if (el) S.ui.keys = el.value;
       var a = S.ui.add, amt = B.round(+String(S.ui.keys || "").replace(/[£,\s]/g, "")); if (!(amt > 0)) { toast("Type the amount first"); if (el) el.focus(); return; }
+      if (amt > 100000) { toast("That looks too big. Check the amount"); return; }
       var date = a.date || todayIso();
       if (a.mode === "bill") {
         var b = db().byId[a.bill]; if (!b) { toast("Choose which bill it was"); return; }
@@ -1158,7 +1312,7 @@
         var row = put("transactions", {id: newId("t"), date: date, person: me(), amount: amt, budget: a.budget, account: a.account || B.mainOf(db(), me()), split: a.split ? (a.splitId || "half") : "", note: a.note || "", source: "app"}, true);
         toast("Logged " + M(amt), {t: "transactions", ids: [row.id]});
       }
-      S.ui.keys = ""; S.ui.add = {mode: a.mode, budget: a.budget, account: a.account}; if (document.activeElement) document.activeElement.blur(); go("today");
+      S.ui.keys = ""; S.ui.add = {mode: a.mode === "bill" ? "spend" : a.mode}; if (document.activeElement) document.activeElement.blur(); go("today");
     },
     undo: function () {
       var u = S.ui.undo; if (!u) return;
@@ -1169,6 +1323,37 @@
       $("#toast").innerHTML = ""; S.ui.undo = null; render();
     },
     syncnow: function () { if (sheetOpen()) closeSheet(); sync(false); }, syncfull: function () { sync(true); },
+    unlock: function () { unlock(); },
+    bankre: function () { S.bank = null; render(); },
+    bankcopy: function () { try { navigator.clipboard.writeText((S.cfg || {}).u || ""); toast("Copied"); } catch (e) { toast("Couldn't copy. Press and hold to copy it."); } },
+    bankmonzo: function () {
+      var id = String(($("#mzId") || {}).value || "").trim(), sec = String(($("#mzSecret") || {}).value || "").trim();
+      if (!id || !sec) { toast("Paste the Client ID and the Client secret first"); return; }
+      var w = window.open("about:blank", "_blank"); // opened straight from the tap so the phone doesn't block it
+      bankCall("bank.monzo.setClient", {clientId: id, clientSecret: sec}).then(function () { return bankCall("bank.monzo.authUrl"); }).then(function (j) {
+        if (w) w.location = j.url; else location.href = j.url;
+        S.bank = null; toast("Approve Budgie in the Monzo app, then come back here");
+      }, function (e) { if (w) w.close(); toast(e.message); });
+    },
+    bankmonzo2: function () { var w = window.open("about:blank", "_blank"); bankCall("bank.monzo.authUrl").then(function (j) { if (w) w.location = j.url; else location.href = j.url; S.bank = null; }, function (e) { if (w) w.close(); toast(e.message); }); },
+    bankstarling: function () {
+      var t = String(($("#stTok") || {}).value || "").trim(); if (!t) { toast("Paste your token first"); return; }
+      toast("Checking the token…");
+      bankCall("bank.starling.setToken", {token: t}).then(function () { ($("#stTok") || {}).value = ""; toast("Connected to Starling"); return bankRefresh(); }).then(function () { sync(false); }, function (e) { toast(e.message); });
+    },
+    banksync: function () { toast("Checking…"); bankCall("bank.syncNow").then(function (j) { toast(j.added || j.updated ? (j.added || 0) + " new, " + (j.updated || 0) + " updated" : "Nothing new"); sync(false); return bankRefresh(); }, function (e) { toast(e.message); }); },
+    bankoff: function () { openSheet("<h2>Disconnect " + esc(bankName()) + '?</h2><p class="muted">Budgie stops reading your bank and forgets its key. Payments it already brought in stay.</p><button type="button" class="btn danger wide" data-a="bankoff2">Disconnect</button><button type="button" class="btn ghost wide" style="margin-top:10px" data-a="sheetclose">Keep it</button>'); },
+    bankoff2: function () { closeSheet(); bankCall("bank.disconnect").then(function () { toast("Disconnected"); return bankRefresh(); }, function (e) { toast(e.message); }); },
+    revbud: function (v) { var k = v.split("|"); reviewSave(k[0], {budget: k[1]}, false); closeSheet(); render(); },
+    revmore: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0] || {}; openSheet('<h2>What was it for?</h2><div class="budgrid" style="margin-top:12px">' + spendBudgets().map(function (b) { return '<button type="button" class="budtile" data-a="revbud" data-v="' + esc(v) + "|" + esc(b.id) + '" aria-pressed="' + (x.budget === b.id) + '">' + icon(budIcon(b.name), 22) + "<span>" + esc(budName(b)) + "</span></button>"; }).join("") + "</div>"); },
+    revsplit: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0]; if (!x) return; reviewSave(v, {split: x.split ? "" : "half"}, false); render(); },
+    revok: function (v) { reviewSave(v, {review: false}, true); toast("Got it"); render(); },
+    revall: function () { var n = 0; reviewRows().forEach(function (x) { if (x.budget) { reviewSave(x.id, {review: false}, true); n++; } }); toast(n + " done"); render(); },
+    emailsave: function () {
+      var to = String(($("#emailTo") || {}).value || "").trim(), on = !!($('[data-c="emailon"]') || {}).checked;
+      if (on && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) { toast("That email address doesn't look right"); return; }
+      setting("email.to", to); setting("email.sunday", on); toast(on ? "Done. Your first one comes on Sunday." : "Saved. No Sunday email."); leave();
+    },
     reload: function () { var done = function () { location.reload(); }; try { navigator.serviceWorker.getRegistration().then(function (r) { return r && r.update(); }).then(done, done); } catch (e) { done(); } },
     disconnect: function () {
       var n = S.data.queue.length;
@@ -1210,10 +1395,13 @@
     if (c === "toggle") {
       if (v === "easy") { S.prefs.easy = el.checked; savePrefs(); if (!demoOn() && me()) setting("easy", el.checked); applyTheme(); render(); }
       if (v === "hide") { S.prefs.hide = el.checked; S.ui.reveal = false; savePrefs(); render(); }
+      if (v === "lock") { if (el.checked) lockEnable().then(function () { render(); }); else { lockDisable(); render(); } }
       if (v === "demo") { setDemo(el.checked); go("today"); }
       return;
     }
     if (c === "share") { setting("share." + v, el.checked); render(); return; }
+    if (c === "bankmap") { var val = el.value; bankCall("bank.map", {extId: v, account: val}).then(function () { toast("Saved"); return bankRefresh(); }, function (e) { toast(e.message); }); return; }
+    if (c === "emailon") return;
     if (c === "addsplit") { S.ui.add.split = el.checked; render(); return; }
     if (c === "adddate") { S.ui.add.date = el.value; render(); return; }
     if (c === "addnote") { S.ui.add.note = el.value; return; }
@@ -1249,6 +1437,53 @@
   document.addEventListener("touchend", function () { if (!sw) return; var f = sw.f; f.style.transition = ""; var openIt = sw.moved ? sw.dx < -60 : false; f.style.transform = "translateX(" + (openIt ? -168 : 0) + "px)"; if (!openIt) { var row = f.parentNode; setTimeout(function () { if (row && !/-168/.test(f.style.transform)) row.classList.remove("open"); }, 200); } if (sw.moved) { f.dataset.swiped = "1"; setTimeout(function () { delete f.dataset.swiped; }, 350); } sw = null; });
   document.addEventListener("click", function (e) { var f = e.target.closest(".swipe .face"); if (f && f.dataset.swiped) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
 
+  // ---------- fingerprint lock ----------
+  // Budgie asks the phone to check your fingerprint (or face, or screen-lock PIN) before it shows anything.
+  // It uses the phone's built-in passkey check; nothing about your fingerprint ever leaves the phone.
+  // When Budgie goes into the background the screen is covered straight away (so it doesn't show in the
+  // app switcher), and coming back after more than a minute asks again.
+  var LOCK = {cred: LS.get("budgie.lock", null), locked: false, hiddenAt: 0, busy: false, GRACE: 60000};
+  var lockOn = function () { return !!(LOCK.cred && LOCK.cred.id) && !demoOn(); };
+  var rnd = function (n) { var a = new Uint8Array(n); crypto.getRandomValues(a); return a; };
+  var b64u = function (buf) { var s2 = "", a = new Uint8Array(buf); for (var i = 0; i < a.length; i++) s2 += String.fromCharCode(a[i]); return btoa(s2).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""); };
+  var unb64u = function (s2) { s2 = s2.replace(/-/g, "+").replace(/_/g, "/"); var bin = atob(s2 + "===".slice((s2.length + 3) % 4)), a = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i); return a; };
+  async function lockSupported() { try { return !!(window.PublicKeyCredential && await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()); } catch (e) { return false; } }
+  async function lockEnable() {
+    if (!(await lockSupported())) { toast("This phone can't check a fingerprint for Budgie. Make sure it has a fingerprint or screen lock set up."); return false; }
+    try {
+      var cred = await navigator.credentials.create({publicKey: {challenge: rnd(32), rp: {name: "Budgie", id: location.hostname}, user: {id: rnd(16), name: (person().name || "Budgie") + " on this phone", displayName: person().name || "Budgie"},
+        pubKeyCredParams: [{type: "public-key", alg: -7}, {type: "public-key", alg: -257}], authenticatorSelection: {authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged"}, timeout: 60000, attestation: "none"}});
+      if (!cred) return false;
+      LOCK.cred = {id: b64u(cred.rawId), at: Date.now()}; LS.set("budgie.lock", LOCK.cred); toast("Fingerprint lock is on"); return true;
+    } catch (e) { toast(e && e.name === "NotAllowedError" ? "Fingerprint lock wasn't turned on" : "Couldn't set up the fingerprint lock: " + (e && e.message || e)); return false; }
+  }
+  function lockDisable() { LOCK.cred = null; LS.set("budgie.lock", null); LOCK.locked = false; showLock(false); toast("Fingerprint lock is off"); }
+  function showLock(on, waiting) {
+    var el = $("#lock");
+    if (!on) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement("div"); el.id = "lock"; el.setAttribute("role", "dialog"); el.setAttribute("aria-label", "Budgie is locked"); document.body.appendChild(el); }
+    el.innerHTML = '<div class="in"><img src="icon-192.png" alt="" width="72" height="72" style="border-radius:18px"><h1>Budgie is locked</h1>' + (waiting ? "" : '<button type="button" class="btn wide" data-a="unlock">Unlock with your fingerprint</button><p class="small" style="opacity:.8;margin-top:10px">Or your face or screen lock, whichever your phone uses.</p>') + "</div>";
+  }
+  async function unlock() {
+    if (LOCK.busy || !lockOn()) return;
+    LOCK.busy = true;
+    try {
+      var a = await navigator.credentials.get({publicKey: {challenge: rnd(32), rpId: location.hostname, allowCredentials: [{type: "public-key", id: unb64u(LOCK.cred.id), transports: ["internal"]}], userVerification: "required", timeout: 60000}});
+      // the phone only answers once it has checked you: flag 0x04 in the answer says it did
+      var flags = a && a.response && a.response.authenticatorData ? new Uint8Array(a.response.authenticatorData)[32] : 0;
+      if (a && (flags & 0x04)) { LOCK.locked = false; showLock(false); render(); }
+      else showLock(true);
+    } catch (e) { showLock(true); if (e && e.name === "InvalidStateError") toast("This phone no longer knows Budgie's lock. Turn it off and on again in Settings."); }
+    finally { LOCK.busy = false; }
+  }
+  function lockNow() { if (!lockOn()) return; LOCK.locked = true; showLock(true); }
+  document.addEventListener("visibilitychange", function () {
+    if (!lockOn()) return;
+    if (document.visibilityState === "hidden") { LOCK.hiddenAt = Date.now(); if (!LOCK.locked) showLock(true, true); }
+    else if (LOCK.locked || Date.now() - LOCK.hiddenAt > LOCK.GRACE) { LOCK.locked = true; showLock(true); unlock(); }
+    else showLock(false);
+  });
+
   // ---------- start ----------
   function setDemo(on) {
     S.prefs.demo = on; S.prefs.easy = null; savePrefs();
@@ -1278,6 +1513,7 @@
     await store.open();
     var saved = await store.get("data"); if (saved && saved.tables) S.data = Object.assign(S.data, saved);
     if (S.prefs.demo) setDemo(true);
+    if (lockOn()) { lockNow(); unlock(); }
     setInterval(function () { if (document.visibilityState === "visible") sync(false); }, 60000);
     document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") { sync(false); render(true); } });
     window.addEventListener("online", function () { sync(false); });
@@ -1285,7 +1521,11 @@
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(function () {});
     try { history.replaceState({b: 0}, ""); } catch (e) {}
     if (location.hash.indexOf("#connect=") >= 0 && connectFrom(location.hash)) return;
+    // long-press the app icon: Log a payment, Payday, Today
+    var jump = (location.search.match(/[?&]go=([a-z]+)/) || [])[1];
+    if (jump) { try { history.replaceState({b: 0}, "", location.pathname); } catch (e) {} }
     render();
+    if (jump && me() && (jump === "add" || jump === "payday" || TABS.indexOf(jump) >= 0) && jump !== "today") go(jump);
     sync(false);
   }
   window.BudgieApp = {S: S, db: db, render: render, go: go, sync: sync, setDemo: setDemo};
