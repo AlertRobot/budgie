@@ -6,7 +6,7 @@
   else root.Budgie = factory();
 })(this, function () {
   "use strict";
-  var VERSION = "1.1.0";
+  var VERSION = "1.2.0";
 
   // ---------- dates ----------
   function D(s) { var p = String(s).split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
@@ -334,9 +334,13 @@
       if (top > 0.004) lines.push({kind: "topup", name: "Top up " + accName(db, fb), amount: top, account: fb, id: "topup"});
     }
     // money already sitting in a pot when the period starts (bills came in cheaper, a pot topped up early) counts
-    // towards that pot's needs; a pot that ended short gets caught up. Only once the period has started.
-    if (!per.opening && addDays(from, -1) >= st && (!db.today || from <= addDays(db.today, 1))) {
+    // towards that pot's needs; a pot that ended short gets caught up; what's left in the main account carries
+    // into the new month. Worked out once the period has started, and estimated for the next payday.
+    var pv0 = db.today && from > addDays(db.today, 1) ? prevPeriod(db, p, per) : null, upcoming = !!(pv0 && pv0.start <= db.today);
+    if (!per.opening && addDays(from, -1) >= st && (!db.today || from <= addDays(db.today, 1) || upcoming)) {
       var dayBefore = addDays(from, -1), bal = Object.assign({}, balances(db, dayBefore)), pv = prevPeriod(db, p, per), bst = pv && pv.start < from ? budgetState(db, p, pv) : {};
+      // before payday, budgets this month can still be spent, so keep what's left of them as well as what carries over
+      var keepOf = function (accId) { var k = 0; Object.keys(bst).forEach(function (id) { var s = bst[id]; if ((s.budget.account || main) !== accId || s.budget.mode === "remainder" || s.budget.mode === "saving") return; k += upcoming ? Math.max(s.carryOut || 0, (s.avail || 0) - (s.spent || 0), 0) : (s.carryOut || 0); }); return k; };
       // moves still on the To do count as done, so a forgotten tick doesn't ask for the money twice
       var pendMove = function (from2, to2, amt) { if (bal[from2] !== undefined) bal[from2] = round(bal[from2] - amt); if (bal[to2] !== undefined) bal[to2] = round(bal[to2] + amt); };
       periods(db, p, st, from).forEach(function (pk) {
@@ -346,12 +350,16 @@
       });
       accountsOf(db, p).forEach(function (a) {
         if (a.kind !== "pot" || a.fallback) return;
-        var keep = 0; Object.keys(bst).forEach(function (k) { if ((bst[k].budget.account || main) === a.id) keep += bst[k].carryOut; });
         var needs = 0; lines.forEach(function (l) { if (l.kind !== "in" && l.account === a.id) needs += l.amount; });
-        var spare = round((bal[a.id] || 0) - keep);
-        if (spare > 0.004 && needs > 0.004) lines.push({kind: "in", name: "Already in " + a.name, amount: round(Math.min(spare, needs)), account: a.id, id: "already", already: true});
-        else if (spare < -0.004) lines.push({kind: "bill", name: "Catch up " + a.name, amount: round(-spare), account: a.id, id: "catchup", catchup: true});
+        var spare = round((bal[a.id] || 0) - keepOf(a.id));
+        if (spare > 0.004 && needs > 0.004) lines.push({kind: "in", name: "Already in " + a.name, amount: round(Math.min(spare, needs)), account: a.id, id: "already", already: true, estimate: upcoming});
+        else if (spare < -0.004) lines.push({kind: "bill", name: "Catch up " + a.name, amount: round(-spare), account: a.id, id: "catchup", catchup: true, estimate: upcoming});
       });
+      if (bal[main] !== undefined) {
+        var left0 = round(bal[main] - keepOf(main));
+        if (left0 > 0.004) lines.push({kind: "in", name: "Left in " + accName(db, main) + " from last month", amount: left0, account: main, id: "leftover", leftover: true, estimate: upcoming});
+        else if (left0 < -0.004) lines.push({kind: "bill", name: "Catch up " + accName(db, main), amount: round(-left0), account: main, id: "catchup", catchup: true, estimate: upcoming});
+      }
     }
     var tin = 0, tout = 0;
     lines.forEach(function (l) { if (l.kind === "in") tin += l.amount; else tout += l.amount; });
@@ -548,7 +556,12 @@
     });
     var pay = pl.lines.filter(function (l) { return l.isPay; })[0] || null;
     var landed = 0; pl.lines.forEach(function (l) { if (l.kind === "in" && l.account === payAcc) landed += l.amount; });
-    return {period: per, pay: pay, payAccount: payAcc, moves: moves, already: already, plan: pl, keeps: round(landed - moves.reduce(function (t, m) { return t + m.amount; }, 0))};
+    var keeps = round(landed - moves.reduce(function (t, m) { return t + m.amount; }, 0)), cover = null;
+    // the main account would go under: the pot that covers going over tops it up
+    var fb = fallbackOf(db, p);
+    if (keeps < -0.004 && fb) { cover = {from: fb, to: payAcc, amount: round(-keeps), why: "This pay doesn't stretch to everything, so " + accName(db, fb) + " covers the gap", cover: true}; keeps = 0; }
+    var estimate = pl.lines.some(function (l) { return l.estimate; });
+    return {period: per, pay: pay, payAccount: payAcc, moves: moves, cover: cover, already: already, plan: pl, keeps: keeps, estimate: estimate};
   }
 
   // ---------- between partners ----------
@@ -680,7 +693,20 @@
   function taxYearStart(date) { var y = +date.slice(0, 4); var s = ymd(y, 3, 6); return date >= s ? s : ymd(y - 1, 3, 6); }
   function lisa(db, accId, date) {
     var tys = taxYearStart(date), paid = 0, all = 0;
-    flows(db, "2000-01-01", date).forEach(function (f) { if (f.account === accId && f.amount > 0 && f.src && !/^val/.test(f.src)) { if (f.date >= tys) paid += f.amount; all += f.amount; } });
+    // history copied from the provider's statement lives in moves with keys lisa:in / lisa:bonus / lisa:fee
+    var bonusIds = {}, feeIds = {}, bonusIn = 0, fees = 0;
+    db.moves.forEach(function (m) {
+      if (/^lisa:bonus/.test(m.key || "") && m.to === accId) { bonusIds[m.id] = 1; if (m.date >= tys && m.date <= date) bonusIn += +m.amount || 0; }
+      if (/^lisa:fee/.test(m.key || "") && m.from === accId) { feeIds[m.id] = 1; if (m.date >= tys && m.date <= date) fees += +m.amount || 0; }
+    });
+    var months = {}, mk = function (d) { return d.slice(0, 7); }, from12 = ymd(+date.slice(0, 4), +date.slice(5, 7) - 12, 1);
+    flows(db, "2000-01-01", date).forEach(function (f) {
+      if (f.account !== accId || !f.src || /^val/.test(f.src)) return;
+      if (f.date >= from12) { var b = months[mk(f.date)] = months[mk(f.date)] || {paid: 0, bonus: 0, fees: 0}; if (bonusIds[f.src]) b.bonus += f.amount; else if (feeIds[f.src] || f.amount < 0) b.fees += -f.amount; else b.paid += f.amount; }
+      if (f.amount > 0 && !bonusIds[f.src]) { if (f.date >= tys) paid += f.amount; all += f.amount; }
+    });
+    var monthList = [];
+    for (var mi = 11; mi >= 0; mi--) { var key = ymd(+date.slice(0, 4), +date.slice(5, 7) - 1 - mi, 1).slice(0, 7), bk = months[key] || {paid: 0, bonus: 0, fees: 0}; monthList.push({month: key, paid: round(bk.paid), bonus: round(bk.bonus), fees: round(bk.fees)}); }
     paid = round(Math.min(paid, 1e9));
     var bal = accountValue(db, accId, date), bonus = round(Math.min(1000, paid * 0.25));
     var series = [], first = "9999";
@@ -702,7 +728,8 @@
     }
     var onCourse = round(paid + planned);
     return {account: accId, name: accName(db, accId), balance: bal, paidThisYear: paid, paidBefore: before, allowanceLeft: round(Math.max(0, 4000 - paid)), bonusThisYear: bonus, taxYearStart: tys, taxYearEnd: tyEnd,
-      planned: round(planned), onCourse: onCourse, overBy: round(Math.max(0, onCourse - 4000)), series: series};
+      planned: round(planned), onCourse: onCourse, overBy: round(Math.max(0, onCourse - 4000)), series: series,
+      bonusReceived: round(bonusIn), feesThisYear: round(fees), months: monthList, checks: db.valuations.filter(function (v) { return v.account === accId; }).length};
   }
 
   // ---------- things to check ----------

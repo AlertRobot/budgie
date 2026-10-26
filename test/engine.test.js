@@ -39,8 +39,9 @@ near("rent share sent on the 13th isn't owed back", bt3.iOwe, 0);
 
 // --- the plan for Ethan's November
 const pl = B.planFor(e, "ethan", B.periodAt(e, "ethan", "2026-11-05"));
-const already = pl.lines.filter(l => l.already).reduce((t, l) => t + l.amount, 0), catchup = pl.lines.filter(l => l.catchup).reduce((t, l) => t + l.amount, 0);
+const already = pl.lines.filter(l => l.already || l.leftover).reduce((t, l) => t + l.amount, 0), catchup = pl.lines.filter(l => l.catchup).reduce((t, l) => t + l.amount, 0);
 near("bills pot: £80 already there counts", pl.lines.find(l => l.already && l.account === "e-bills").amount, 80);
+near("what is left in the main account carries into the new month", (pl.lines.find(l => l.leftover) || {}).amount, 300 - 200 * 3 / 28);
 near("food pot: what's beyond the carried-over food counts", pl.lines.find(l => l.already && l.account === "e-food").amount, 45 - 24.11);
 near("car pot was short of the fuel carried over: caught up", catchup, 24.11 * 0 + (10.71 - 5));
 near("money in: pay + Sophie's shares + money already in pots", pl.totals.in, 2650 + 400 + 150 + already);
@@ -103,6 +104,25 @@ near("LISA: going over the limit is flagged", B.lisa(pb, "e-lisa", "2026-10-26")
 // --- things to check
 const ck = db(t => { t.settings.push({person: "ethan", key: "check:e-home", value: JSON.stringify({t: "Is £50 right?", a: "edit", v: "budgets:e-home", o: 2})}, {person: "ethan", key: "check:pots", value: JSON.stringify({t: "Pots", a: "go", v: "pots", o: 1})}, {person: "ethan", key: "check:old", value: "done"}, {person: "sophie", key: "check:s", value: JSON.stringify({t: "Hers"})}); });
 eq("checks: open ones, in order, only mine", B.checks(ck, "ethan").map(c => c.id), ["pots", "e-home"]);
+
+
+// --- LISA history from the provider's statement: payments count towards the limit, bonuses and fees don't
+const lh = db(t => { t.moves.push(
+  {id: "h1", date: "2026-05-11", person: "ethan", from: "", to: "e-lisa", amount: 334, key: "lisa:in:2026-05-11"},
+  {id: "h2", date: "2026-09-09", person: "ethan", from: "", to: "e-lisa", amount: 334, key: "lisa:in:2026-09-09"},
+  {id: "h3", date: "2026-10-01", person: "ethan", from: "", to: "e-lisa", amount: 83.5, key: "lisa:bonus:2026-10-01"},
+  {id: "h4", date: "2026-10-07", person: "ethan", from: "e-lisa", to: "", amount: 4.56, key: "lisa:fee:2026-10-07"}); });
+const LH = B.lisa(lh, "e-lisa", "2026-10-26");
+near("LISA history: payments count", LH.paidThisYear, 668);
+near("LISA history: bonus received", LH.bonusReceived, 83.5);
+near("LISA history: fees", LH.feesThisYear, 4.56);
+eq("LISA history: by month", LH.months.filter(m => m.paid || m.bonus || m.fees).map(m => [m.month, m.paid, m.bonus, m.fees]), [["2026-05", 334, 0, 0], ["2026-09", 334, 0, 0], ["2026-10", 0, 83.5, 4.56]]);
+near("LISA history doesn't change today's balance", B.balances(lh, "2026-10-26")["e-lisa"], 11240);
+
+// --- a payday that can't cover everything: the fallback pot covers the gap
+const sh = db(t => { t.bills.push({id: "big", person: "ethan", name: "Big one-off", amount: 2500, account: "e-bills", unit: "once", start: "2026-11-20"}); });
+const shp = B.payday(sh, "ethan", B.periodAt(sh, "ethan", "2026-11-05"));
+eq("short pay: Emergency pot covers it", [shp.cover && shp.cover.from, shp.keeps], ["e-emergency", 0]);
 
 // --- whole picture runs without errors for both, across a year
 ["ethan", "sophie"].forEach(p => {

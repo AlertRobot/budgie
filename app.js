@@ -1,7 +1,7 @@
 /* Budgie app: screens, syncing and offline queue. The maths lives in engine.js. */
 (function () {
   "use strict";
-  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.1.0";
+  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.2.0";
   var $ = function (s) { return document.querySelector(s); };
   var esc = function (s) { return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]; }); };
   var LS = {get: function (k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }};
@@ -73,6 +73,7 @@
   }
   function setting(key, value) { var id = me() + ":" + key; put("settings", {id: id, person: me(), key: key, value: String(value)}, true); }
   function getSetting(key, d) { return B.setting(db(), me(), key, d); }
+  function getSettingFor(p, key, d) { return B.setting(db(), p, key, d); }
 
   // ---------- sync ----------
   var syncTimer = null;
@@ -235,6 +236,10 @@
       '<div class="big">' + M(t.safe) + '</div><div class="small" style="opacity:.92">' + (spendNames.length ? "for " + esc(joinWords(spendNames)) : "") + "</div>" +
       '<div class="line"><span>' + (daysTo === 0 ? "Payday is today" : "Payday in " + daysTo + " day" + (daysTo === 1 ? "" : "s") + " · " + esc(B.nice(t.nextPay))) + "</span><span class=\"num\">" + (t.nextPayAmount ? M(t.nextPayAmount) : "") + "</span></div></section>";
     if (t.plan.shortfall > 0.5) html += card('<div class="what bad" style="font-weight:700">This month is ' + M(t.plan.shortfall) + " short</div><p class=\"small muted\" style=\"margin:4px 0 0\">Bills, budgets and savings add up to more than is coming in. Lower a budget or saving in Settings.</p>");
+    else if (daysTo <= 7) {
+      var nextPd = B.payday(d, p, B.periodAt(d, p, t.nextPay)), gap = nextPd.cover ? nextPd.cover.amount : nextPd.plan.shortfall;
+      if (gap > 0.5) html += '<button type="button" class="card li" style="display:block;text-align:left;padding:14px 16px" data-a="go" data-v="payday"><div class="what warn" style="font-weight:700">Next month looks ' + M(gap) + " short</div><div class=\"small muted\">Tap to see your payday plan and what covers it.</div></button>";
+    }
     // to do
     var items = t.todo, payItems = items.filter(function (x) { return x.payday; }), rest = items.filter(function (x) { return !x.payday; });
     last.todo = rest;
@@ -315,8 +320,10 @@
   // ----- Add
   SCREENS.add = function () {
     var a = S.ui.add, d = db(), p = me(), mode = a.mode || "spend";
-    var buds = d.budgets.filter(function (b) { return b.person === p && b.mode !== "saving" && !(b.mode === "remainder" && /isa|lisa|saving|pension/.test((d.byId[b.account] || {}).kind || "")); });
-    if (!a.budget && buds[0]) a.budget = buds[0].id;
+    var aper = B.periodAt(d, p, a.date || todayIso());
+    // only budgets running in the pay period of the date being logged (Christmas money shows from late November)
+    var buds = d.budgets.filter(function (b) { return b.person === p && b.mode !== "saving" && !(b.mode === "remainder" && /isa|lisa|saving|pension/.test((d.byId[b.account] || {}).kind || "")) && (!b.start || b.start < aper.next) && (!b.end || b.end >= aper.start); });
+    if ((!a.budget || !buds.some(function (b) { return b.id === a.budget; })) && buds[0]) a.budget = buds[0].id;
     var accs = B.accountsOf(d, p).filter(function (x) { return /main|pot|saving|credit/.test(x.kind || "pot"); });
     if (!a.account) a.account = B.mainOf(d, p);
     var html = '<div class="seg" role="group" aria-label="What to add"><button type="button" data-a="addmode" data-v="spend" aria-pressed="' + (mode === "spend") + '">A payment</button><button type="button" data-a="addmode" data-v="bill" aria-pressed="' + (mode === "bill") + '">A bill came in</button></div>';
@@ -392,10 +399,17 @@
       var key = "pay:" + per.start + ":" + m.to, done = !!d.moveKeys[key];
       return '<label class="li" style="cursor:pointer"><input type="checkbox" class="tick" data-c="paytick" data-v="' + esc(key) + "|" + esc(m.from) + "|" + esc(m.to) + "|" + m.amount + '"' + (done ? " checked" : "") + (upcoming ? " disabled" : "") + '><span class="grow"><span class="what">' + esc(B.accName(d, m.to)) + '</span><span class="why">' + esc(m.why) + "</span></span>" + num(M(m.amount)) + "</label>";
     }).join("");
+    if (pd.cover) {
+      var ckey = "pay:" + per.start + ":cover", cdone = !!d.moveKeys[ckey];
+      html += card('<div class="warn" style="font-weight:700">This pay is ' + M(pd.cover.amount) + " short of everything planned</div><p class=\"small muted\" style=\"margin:4px 0 8px\">Your " + esc(B.accName(d, pd.cover.from)) + " covers the gap so your " + esc(B.accName(d, pd.payAccount)) + " doesn't go under. To avoid it, lower a budget or saving this month.</p>" +
+        '<label class="li" style="cursor:pointer"><input type="checkbox" class="tick" data-c="paytick" data-v="' + esc(ckey) + "|" + esc(pd.cover.from) + "|" + esc(pd.cover.to) + "|" + pd.cover.amount + '"' + (cdone ? " checked" : "") + (upcoming ? " disabled" : "") + '><span class="grow"><span class="what">' + esc(B.accName(d, pd.cover.from)) + " to " + esc(B.accName(d, pd.cover.to)) + "</span></span>" + num(M(pd.cover.amount)) + "</label>");
+    }
     var doneN = pd.moves.filter(function (m) { return d.moveKeys["pay:" + per.start + ":" + m.to]; }).length;
     html += card('<div class="row"><h2>Move from ' + esc(B.accName(d, pd.payAccount)) + '</h2><span class="small muted">' + (upcoming ? "On payday" : doneN + " of " + pd.moves.length + " done") + '</span></div><div class="list" style="margin-top:6px">' + (rows || '<p class="muted">Nothing to move.</p>') + "</div>" +
       '<div class="row" style="padding-top:10px;border-top:1px solid var(--line2);margin-top:4px"><span>Stays in ' + esc(B.accName(d, pd.payAccount)) + "</span>" + num(M(pd.keeps)) + "</div>");
-    if (pd.already.length) html += '<div class="banner small">Less to move: ' + pd.already.map(function (a) { return M(a.amount) + " is already in your " + esc(a.name); }).join(", ") + ".</div>";
+    var left = pd.plan.lines.filter(function (l) { return l.leftover; })[0];
+    if (pd.already.length || left) html += '<div class="banner small">Less to move: ' + pd.already.map(function (a) { return M(a.amount) + " is already in your " + esc(a.name); }).concat(left ? [M(left.amount) + " left in your " + esc(B.accName(d, pd.payAccount)) + " carries over"] : []).join(", ") + ".</div>";
+    if (upcoming && pd.estimate) html += '<p class="tiny muted" style="margin:8px 4px">These are estimates until payday: they use what should be in your ' + esc(potWord(true)) + " then. Log spending as you go and they stay right.</p>";
     if (pd.plan.shortfall > 0.004) html += card('<div class="bad" style="font-weight:700">This pay is ' + M(pd.plan.shortfall) + " short of the plan.</div><p class=\"small muted\">Lower a budget or saving for this month in Settings.</p>");
     return html;
   };
@@ -465,11 +479,26 @@
     mineFirst.forEach(function (a) {
       var L = B.lisa(d, a.id, now); together += L.balance;
       var vals = L.series.map(function (x) { return x.amount; }), whose = a.owner === me() ? "Your" : esc(person(a.owner).name) + "'s";
+      // the value line needs at least two real balances to mean anything; until then show what went in each month
+      var valueChart = L.checks >= 2 && vals.length >= 2 ? chart(vals, 320, 130, {label: "Value over time"}) + '<div class="row tiny muted"><span>' + esc(B.nice(L.series[0].date).replace(/^\w+ /, "")) + "</span><span>Now</span></div>" : "";
+      var mx = Math.max.apply(null, L.months.map(function (x) { return x.paid + x.bonus; }).concat([1]));
+      var anyMonths = L.months.some(function (x) { return x.paid || x.bonus; });
+      var monthBars = anyMonths ? '<div class="small" style="font-weight:600;margin-top:12px">Paid in each month</div><div class="bars" style="height:120px;margin-top:6px">' + L.months.map(function (x) {
+        var h1 = Math.round(x.paid / mx * 90), h2 = Math.round(x.bonus / mx * 90), lab = ["J", "F", "M", "A", "M", "J", "J", "A", "S", "O", "N", "D"][+x.month.slice(5, 7) - 1];
+        return '<div title="' + esc(x.month + ": " + B.money(x.paid) + " in, " + B.money(x.bonus) + " bonus, " + B.money(x.fees) + " fees") + '"><span class="num" style="font-size:10px">' + (x.paid + x.bonus ? M0(x.paid + x.bonus) : "") + '</span><span class="stack"><i style="height:' + Math.max(h1 ? 2 : 0, h1) + 'px"></i><i class="plan" style="height:' + h2 + 'px"></i></span><span>' + lab + "</span></div>";
+      }).join("") + '</div><div class="tiny muted" style="margin-top:4px">Solid: what you paid in. Light: government bonus.</div>' : "";
+      var hold = null; try { hold = JSON.parse(getSettingFor(a.owner, "lisa.holdings." + a.id, "") || "null"); } catch (e) {}
+      var holdHtml = hold && hold.items && hold.items.length ? (function () {
+        var tot = hold.items.reduce(function (t, x) { return t + (+x[1] || 0); }, 0);
+        return '<div class="small" style="font-weight:600;margin-top:14px">What it\'s invested in' + (hold.date ? ' <span class="muted" style="font-weight:400">(' + esc(B.nice(hold.date)) + ")</span>" : "") + "</div>" +
+          hold.items.map(function (x) { var pc = tot ? Math.round(x[1] / tot * 100) : 0; return '<div style="margin-top:6px"><div class="row small"><span>' + esc(x[0]) + '</span><span class="num">' + M0(x[1]) + " · " + pc + "%</span></div>" + bar(pc) + "</div>"; }).join("");
+      })() : "";
       html += card('<div class="small muted">' + whose + " Lifetime ISA</div>" + '<div class="row" style="align-items:center"><span style="font-size:32px;font-weight:800;font-family:var(--head)">' + M0(L.balance) + "</span>" + (a.owner === me() ? '<button type="button" class="btn ghost sm" data-a="potcheck" data-v="' + esc(a.id) + '">Update</button>' : "") + "</div>" +
-        (vals.some(function (v) { return v; }) ? chart(vals, 320, 130, {label: "Balance over two years"}) + '<div class="row tiny muted"><span>2 years ago</span><span>Now</span></div>' : "") +
-        '<div style="margin-top:12px"><div class="row small"><span style="font-weight:600">This tax year (6 Apr to 5 Apr)</span><span class="num">' + M0(L.paidThisYear) + " of £4,000</span></div>" + '<div style="margin-top:6px">' + bar(L.paidThisYear / 40) + '</div><div class="small muted" style="margin-top:4px">About ' + M(L.bonusThisYear) + " bonus · " + M0(L.allowanceLeft) + " left you can pay in</div>" +
+        valueChart + monthBars + holdHtml +
+        (L.bonusReceived || L.feesThisYear ? '<div class="small muted" style="margin-top:10px">This tax year: ' + M(L.bonusReceived) + " bonus received · " + M(L.feesThisYear) + " fees</div>" : "") +
+        '<div style="margin-top:12px"><div class="row small"><span style="font-weight:600">This tax year (6 Apr to 5 Apr)</span><span class="num">' + M0(L.paidThisYear) + " of £4,000</span></div>" + '<div style="margin-top:6px">' + bar(L.paidThisYear / 40) + '</div><div class="small muted" style="margin-top:4px">' + M0(L.allowanceLeft) + " left you can pay in · bonus on this year's payments about " + M(L.bonusThisYear) + "</div>" +
         (L.planned ? '<div class="small" style="margin-top:8px">On course for ' + M0(L.onCourse) + " by 5 April" + (L.overBy ? '. <span class="warn">That\'s ' + M(L.overBy) + " over the £4,000 limit, and your provider turns away anything over it. Pay in a little less before then.</span>" : L.onCourse >= 3999.5 ? '. <span class="good">That\'s the full £1,000 bonus.</span>' : ".") + "</div>" : "") +
-        (a.owner === me() ? '<button type="button" class="btn ghost sm" style="margin-top:8px" data-a="lisapaid" data-v="' + esc(a.id) + '">' + (L.paidBefore ? "Paid in before Budgie: " + M0(L.paidBefore) : "Add what you paid in before Budgie") + "</button>" : "") + "</div>");
+        (a.owner === me() && (L.paidBefore || !anyMonths) ? '<button type="button" class="btn ghost sm" style="margin-top:8px" data-a="lisapaid" data-v="' + esc(a.id) + '">' + (L.paidBefore ? "Paid in before Budgie: " + M0(L.paidBefore) : "Add what you paid in before Budgie") + "</button>" : "") + "</div>");
     });
     if (mineFirst.length > 1) html += card('<div class="row"><span style="font-weight:700">Together</span>' + num(M0(together)) + "</div>");
     html += '<div class="banner small"><b>The rules Budgie keeps an eye on.</b> Up to £4,000 a year, plus a 25% government bonus (up to £1,000). For a first home up to £450,000. Taking money out for anything else costs 25%. The government plans to replace the LISA with a new first-time-buyer account from April 2028; existing LISAs carry on for now.</div>';
@@ -857,8 +886,8 @@
       var a = +String(($("#payAmt") || {}).value || "").replace(/[£,\s]/g, ""), o = S.ui.payOcc; if (!(a > 0)) return;
       put("exceptions", {id: "x-" + o.item + "-" + o.date + "-amount", item: o.item, date: o.date, action: "amount", amount: a}); closeSheet(); toast("Pay set to " + B.money(a) + ". Everything has re-sorted.");
     },
-    potcheck: function (v) { var a = db().byId[v]; S.ui.potCheck = v; openSheet("<h2>" + esc(a.name) + '</h2><p class="muted">What does your ' + esc(person().bank || "bank") + ' app show right now? Budgie starts again from this.</p><label class="f">Balance<input type="text" inputmode="decimal" id="potBal" placeholder="£"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="potsave">Save</button>'); },
-    potsave: function () { var a = +String(($("#potBal") || {}).value || "").replace(/[£,\s]/g, ""); if (isNaN(a) || ($("#potBal") || {}).value === "") return; put("valuations", {id: newId("val"), account: S.ui.potCheck, date: todayIso(), amount: a}, true); markChecked(S.ui.potCheck); closeSheet(); toast("Thanks. Budgie has caught up."); render(); },
+    potcheck: function (v) { var a = db().byId[v]; S.ui.potCheck = v; openSheet("<h2>" + esc(a.name) + '</h2><p class="muted">What does your ' + esc(person().bank || "bank") + ' app show right now? Budgie starts again from this.</p><label class="f">Balance<input type="text" inputmode="decimal" id="potBal" placeholder="£"></label>' + (/lisa|isa|pension|saving/.test(a.kind || "") ? '<label class="f">On<input type="date" id="potDate" value="' + todayIso() + '" max="' + todayIso() + '"></label><p class="tiny muted" style="margin:6px 0 0">You can add past balances too (say, the last day of each month) to fill in the chart.</p>' : "") + '<button type="button" class="btn wide" style="margin-top:12px" data-a="potsave">Save</button>'); },
+    potsave: function () { var a = +String(($("#potBal") || {}).value || "").replace(/[£,\s]/g, ""); if (isNaN(a) || ($("#potBal") || {}).value === "") return; var vd = (($("#potDate") || {}).value || todayIso()); put("valuations", {id: newId("val"), account: S.ui.potCheck, date: vd > todayIso() ? todayIso() : vd, amount: a}, true); markChecked(S.ui.potCheck); closeSheet(); toast("Thanks. Budgie has caught up."); render(); },
     chk: function (v) {
       var c = checkList().filter(function (x) { return x.id === v; })[0]; if (!c) return;
       closeSheet(true);
@@ -941,7 +970,7 @@
     }
     if (c === "share") { setting("share." + v, el.checked); render(); return; }
     if (c === "addsplit") { S.ui.add.split = el.checked; render(); return; }
-    if (c === "adddate") { S.ui.add.date = el.value; return; }
+    if (c === "adddate") { S.ui.add.date = el.value; render(); return; }
     if (c === "addnote") { S.ui.add.note = el.value; return; }
     if (c === "hrate") { S.ui.house.rate = +el.value || 4.5; render(); return; }
     if (c === "hterm") { S.ui.house.term = +el.value || 30; render(); return; }
