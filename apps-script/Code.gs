@@ -9,9 +9,10 @@
  *   4. Paste the URL into WEB_APP_URL below, save, run "connectLinks". Open each link on that person's phone.
  *
  * Keys live only in this script's properties. Run "newKey" with a name to change someone's key.
+ * Other apps (Peckish) get their own narrower key: run appLink("ethan", "peckish") and open the link it logs.
  */
 var WEB_APP_URL = "";
-var APP_URL = "https://alertrobot.github.io/budgie/";
+var APP_URL = "https://budgie-money.github.io/";
 var SCHEMA_VERSION = 1;
 var COMMON = ["deleted", "updated", "by"];
 var SCHEMA = {
@@ -22,8 +23,8 @@ var SCHEMA = {
   budgets: ["id", "person", "name", "amount", "mode", "account", "carry", "start", "end", "notes"],
   splits: ["id", "name", "shares", "notes"],
   transfers: ["id", "from", "to", "name", "amount", "fromAccount", "toAccount", "purpose", "unit", "every", "on", "shift", "start", "end", "dates", "notes"],
-  transactions: ["id", "date", "person", "amount", "budget", "account", "split", "note", "source"],
-  moves: ["id", "date", "person", "from", "to", "amount", "key", "note"],
+  transactions: ["id", "date", "person", "amount", "budget", "account", "split", "note", "source", "bankId", "review", "splitHint"],
+  moves: ["id", "date", "person", "from", "to", "amount", "key", "note", "review"],
   settlements: ["id", "date", "from", "to", "amount", "fromAccount", "toAccount", "loan", "key", "note"],
   loans: ["id", "lender", "borrower", "name", "amount", "date", "account", "repay", "repayFrom", "repayDay", "notes"],
   goals: ["id", "owners", "name", "target", "due", "accounts", "kind", "extra", "price", "notes"],
@@ -40,7 +41,7 @@ var SERVER_ONLY = {meta: true, prices: true};
 var HELP = {
   people: "One row per person.", accounts: "Every bank account, pot, Space, ISA and LISA. kind: main, pot, saving, isa, lisa, pension, credit. fallback = TRUE on the one pot that covers going over budget.",
   income: "Money that comes in on a schedule. isPay = TRUE for your salary (it sets your pay periods).", bills: "Money that goes out on a schedule. split: a row id from splits if you share it.",
-  budgets: "mode: daily, weekly, oneoff, saving or remainder (gets whatever is left).", splits: "shares: \"ethan:2, sophie:1\" for parts, or \"sophie=375\" for a fixed amount.",
+  budgets: "mode: daily, weekly, oneoff, saving or remainder (gets whatever is left).", splits: "shares: \"ethan:2, sophie:1\" for parts, or \"sophie=500\" for a fixed amount.",
   transfers: "One of you paying the other on a schedule, like a rent share.", transactions: "Every payment you log.", moves: "Pot moves you ticked off in the app.",
   settlements: "One-off payments between you two. loan: a row id from loans if it repays one.", loans: "Money one of you owes the other. repay: amount each month from repayFrom.",
   goals: "owners: who it belongs to. accounts: which accounts count towards it.", valuations: "A balance you checked. Everything after its date is worked out.",
@@ -70,12 +71,64 @@ function connectLinks() {
     Logger.log(p.name + ": " + APP_URL + "#connect=" + Utilities.base64EncodeWebSafe(JSON.stringify({u: url, k: k})));
   });
 }
-function newKey(personId) {
+// newKey("sophie") changes Sophie's Budgie key; newKey("ethan", "peckish") changes only Ethan's Peckish key
+function newKey(personId, app) {
   if (!personId) throw new Error("Run newKey from another function, e.g. newKey('sophie').");
-  PropertiesService.getScriptProperties().setProperty("KEY_" + personId, makeKey_());
+  if (app) return newAppKey(personId, app);
+  var props = PropertiesService.getScriptProperties(), old = props.getProperty("KEY_" + personId);
+  props.setProperty("KEY_" + personId, makeKey_()); forgetKey_(old);
   Logger.log("New key made for " + personId + ". Run connectLinks and reconnect that phone.");
 }
-function makeKey_() { return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ""); }
+function makeKey_() { return (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, "").toLowerCase(); }
+
+// ---------- keys for other apps (Peckish) ----------
+// an app key can only do what its app needs: see APP_RULES_ below
+var APPS_ = {peckish: {name: "Peckish", url: "https://alertrobot.github.io/es-kitchen/"}, caledonite: {name: "Caledonite", url: "https://alertrobot.github.io/caledonite/"}};
+function appKeyName_(personId, app) { return "APPKEY_" + personId + "_" + app; }
+function makeAppKey_(app) { return "app_" + app + "_" + makeKey_(); }
+function appCheckArgs_(personId, app) {
+  if (!personId || !app) throw new Error("Run it from another function, e.g. appLink('ethan', 'peckish').");
+  if (!APPS_[app]) throw new Error("Budgie doesn't know an app called " + app + ". Known: " + Object.keys(APPS_).join(", ") + ".");
+  if (!readTable_("people").rows.some(function (p) { return p.id === personId; })) throw new Error("No person called " + personId + " in the people tab.");
+}
+function appWebUrl_() {
+  var url = WEB_APP_URL || ScriptApp.getService().getUrl() || "";
+  if (!/\/exec$/.test(url)) throw new Error("Paste your Web app URL (ending /exec) into WEB_APP_URL at the top, save, and run again.");
+  return url;
+}
+function appLinkFor_(app, k) { return APPS_[app].url + "#connect=" + Utilities.base64EncodeWebSafe(JSON.stringify({u: appWebUrl_(), k: k})); }
+/** Logs a connect link for another app (e.g. appLink("ethan", "peckish")). Makes the app's key the first time. */
+function appLink(personId, app) {
+  appCheckArgs_(personId, app);
+  appWebUrl_();
+  var props = PropertiesService.getScriptProperties(), k = props.getProperty(appKeyName_(personId, app));
+  if (!k) { k = makeAppKey_(app); props.setProperty(appKeyName_(personId, app), k); }
+  var who = (readTable_("people").rows.filter(function (p) { return p.id === personId; })[0] || {}).name || personId;
+  var link = appLinkFor_(app, k);
+  Logger.log(who + " (" + APPS_[app].name + "): " + link);
+  return link;
+}
+// from the app (a person's own full key only): link, unlink and list their other apps
+// app.link always makes a new key, so making a new link cuts off any old copy of the last one
+function appKeyAction_(me, b) {
+  var props = PropertiesService.getScriptProperties();
+  if (b.action === "app.status") { var apps = {}; Object.keys(APPS_).forEach(function (a) { apps[a] = !!props.getProperty(appKeyName_(me, a)); }); return {ok: true, keyType: "full", apps: apps}; }
+  var app = String(b.app || "");
+  if (!APPS_[app]) return {ok: false, keyType: "full", error: "Budgie doesn't know that app."};
+  var old = props.getProperty(appKeyName_(me, app));
+  if (b.action === "app.unlink") { if (old) { props.deleteProperty(appKeyName_(me, app)); forgetKey_(old); } return {ok: true, keyType: "full"}; }
+  var k = makeAppKey_(app), link = appLinkFor_(app, k);
+  props.setProperty(appKeyName_(me, app), k); forgetKey_(old);
+  return {ok: true, keyType: "full", link: link};
+}
+/** Changes one person's key for one app (the old one stops working), and logs the new link. */
+function newAppKey(personId, app) {
+  appCheckArgs_(personId, app);
+  var props = PropertiesService.getScriptProperties(), old = props.getProperty(appKeyName_(personId, app));
+  props.setProperty(appKeyName_(personId, app), makeAppKey_(app)); forgetKey_(old);
+  Logger.log("New " + APPS_[app].name + " key made for " + personId + ".");
+  try { return appLink(personId, app); } catch (e) { Logger.log(String(e.message || e)); return ""; }
+}
 function ensureTab_(ss, t) {
   var cols = SCHEMA[t].concat(t === "meta" ? [] : COMMON), sh = ss.getSheetByName(t);
   if (!sh) { sh = ss.insertSheet(t); sh.getRange(1, 1, 1, cols.length).setValues([cols]).setFontWeight("bold").setBackground("#E3ECF5"); sh.setFrozenRows(1); sh.getRange(1, 1).setNote(HELP[t] || ""); return sh; }
@@ -86,7 +139,12 @@ function ensureTab_(ss, t) {
 
 // ---------- web ----------
 // keys only travel in POST bodies, never in a URL (where they'd end up in logs and history)
-function doGet(e) { return json_({ok: true, app: "Budgie", note: "The app talks to this with POST."}); }
+function doGet(e) {
+  // Monzo sends the browser back here after you sign in (BankFeeds.gs)
+  var q = (e && e.parameter) || {};
+  if (/^[A-Za-z0-9]{64}$/.test(String(q.state || "")) && (q.code || q.error) && typeof bankCallback_ === "function") return bankCallback_(q);
+  return json_({ok: true, app: "Budgie", note: "The app talks to this with POST."});
+}
 function doPost(e) {
   var body = {};
   try { body = JSON.parse((e && e.postData && e.postData.contents) || "{}"); } catch (x) {}
@@ -97,18 +155,39 @@ function doPost(e) {
 function handle_(b) {
   var lock = LockService.getScriptLock(), locked = false;
   try {
-    var me = whoIs_(b.key);
-    if (b.action === "ping") return json_({ok: true, person: me});
+    var who = whoIs_(b.key), me = who.person, app = who.app, keyType = app ? "app" : "full";
+    var notAllowed = function () { return json_({ok: false, keyType: "app", app: app, error: NOT_ALLOWED_}); };
+    if (b.action === "ping") return json_(app ? {ok: true, person: me, app: app, keyType: keyType} : {ok: true, person: me, keyType: keyType});
+    // another app's key: only the actions its app needs (Caledonite: the calendar, nothing else)
+    var rule = app ? APP_RULES_[app] : null;
+    if (b.action === "app.calendar") {
+      if (app && !(rule.actions || {})["app.calendar"]) return notAllowed();
+      lock.waitLock(25000); locked = true;
+      var csnap; try { csnap = snapshot_(); } finally { lock.releaseLock(); locked = false; }
+      var cal = appCalendar_(me, csnap); cal.keyType = keyType; return json_(cal);
+    }
+    // linking other apps: only with a person's own full key
+    if (b.action === "app.link" || b.action === "app.unlink" || b.action === "app.status") return app ? notAllowed() : json_(appKeyAction_(me, b));
+    if (app && !rule.reads) return notAllowed();
+    // bank feeds (BankFeeds.gs): always about the caller's own bank, and never for another app's key
+    if (typeof b.action === "string" && /^bank\./.test(b.action)) {
+      if (app) return notAllowed();
+      if (typeof bankAction_ !== "function") return json_({ok: false, keyType: keyType, error: "Bank feeds aren't set up on this sheet"});
+      var br = bankAction_(me, b); br.keyType = keyType;
+      if (b.action === "bank.status" && br.ok) br.apps = appKeyAction_(me, {action: "app.status"}).apps;
+      return json_(br);
+    }
+    if (app && b.action) return notAllowed();
     var applied = [], rejected = [], snap;
     // reads take the lock too, so a sync never sees half of another phone's batch and skips the rest;
     // the lock covers writing and taking a copy of the tables, the working out happens after it's released
     lock.waitLock(25000); locked = true;
     try {
-      if (Array.isArray(b.ops) && b.ops.length) { var res = applyOps_(me, b.ops); applied = res.applied; rejected = res.rejected; if (applied.length) SpreadsheetApp.flush(); }
+      if (Array.isArray(b.ops) && b.ops.length) { var res = applyOps_(me, b.ops, app); applied = res.applied; rejected = res.rejected; if (applied.length) SpreadsheetApp.flush(); }
       snap = snapshot_();
     } finally { lock.releaseLock(); locked = false; }
-    var out = sync_(me, b.since || "", !!b.full, snap);
-    out.applied = applied; out.rejected = rejected;
+    var out = app ? appSync_(me, app, b.since || "", !!b.full, snap) : sync_(me, b.since || "", !!b.full, snap);
+    out.applied = applied; out.rejected = rejected; out.keyType = keyType;
     if (applied.length) { try { maybeRefreshViews_(); } catch (x) { out.viewError = String(x); } }
     return json_(out);
   } catch (err) {
@@ -116,12 +195,31 @@ function handle_(b) {
     return json_({ok: false, error: String(err && err.message || err)});
   }
 }
+var NOT_ALLOWED_ = "That's not allowed with this link";
 function json_(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
+// who a key belongs to: {person, app} (app is "" for a person's own Budgie key)
+// A key that isn't the right shape is turned away before anything is read, and answers are kept for 10 minutes,
+// so a flood of made-up keys can't use up the script's quota.
+var KEY_RE_ = /^[0-9a-f]{64}$/, APPKEY_RE_ = /^app_[a-z]+_[0-9a-f]{64}$/;
+function keyHash_(k) { try { return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(k))); } catch (e) { return String(k); } }
+function keyCache_() { try { return typeof CacheService !== "undefined" ? CacheService.getScriptCache() : null; } catch (e) { return null; } }
+function forgetKey_(k) { if (!k) return; try { var c = keyCache_(); if (c && c.remove) c.remove("who:" + keyHash_(k)); } catch (e) {} }
 function whoIs_(k) {
   if (!k) throw new Error("No app key");
-  var all = PropertiesService.getScriptProperties().getProperties();
-  for (var name in all) if (/^KEY_/.test(name) && all[name] === String(k)) return name.slice(4);
-  throw new Error("Wrong app key");
+  k = String(k);
+  if (!KEY_RE_.test(k) && !APPKEY_RE_.test(k)) throw new Error("Wrong app key");
+  var cache = keyCache_(), ck = "who:" + keyHash_(k), hit = null;
+  try { hit = cache ? cache.get(ck) : null; } catch (e) { hit = null; }
+  if (hit) { var c = JSON.parse(hit); if (!c) throw new Error("Wrong app key"); return c; }
+  var all = PropertiesService.getScriptProperties().getProperties(), who = null;
+  for (var name in all) {
+    if (all[name] !== k) continue;
+    var m = name.match(/^KEY_(.+)$/); if (m && KEY_RE_.test(k)) { who = {person: m[1], app: ""}; break; }
+    m = name.match(/^APPKEY_(.+)_([a-z]+)$/); if (m && APPKEY_RE_.test(k) && APPS_[m[2]]) { who = {person: m[1], app: m[2]}; break; }
+  }
+  try { if (cache) cache.put(ck, JSON.stringify(who), 600); } catch (e) {}
+  if (!who) throw new Error("Wrong app key");
+  return who;
 }
 
 // ---------- reading ----------
@@ -186,46 +284,90 @@ function canSee_(me, t, r, sharing) {
 
 // ---------- writing ----------
 // each change is saved or refused on its own, so one refused change never holds up the rest
-function applyOps_(me, ops) {
+function applyOps_(me, ops, app) {
   var now = Date.now(), applied = [], rejected = [];
   ops.forEach(function (op, i) {
     var t = op && op.table, id = op && (op.id || (op.row && op.row.id));
-    try { applyOne_(me, op || {}, now); applied.push({table: t, id: id}); }
+    try { applyOne_(me, op || {}, now, "", {app: app || ""}); applied.push({table: t, id: id || (op && op.row && t === "settings" && op.row.person && op.row.key ? op.row.person + ":" + op.row.key : id)}); }
     catch (e) { rejected.push({i: i, table: t || "", id: id || "", error: String(e && e.message || e)}); }
   });
   return {applied: applied, rejected: rejected};
 }
-// text that a sheet would read as a formula is stored as plain text
+// text that a sheet would read as a formula (or would lose a leading apostrophe from) is stored as plain text.
+// Leading spaces and control characters are looked past, so " =HYPERLINK(…)" is caught too.
+// Numbers, true/false, dates and ids are left as they are.
 function cell_(v) {
   if (v === undefined || v === null) return "";
-  if (typeof v === "string" && /^[=+\-@]/.test(v) && !/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(v)) return "'" + v;
-  return v;
+  if (typeof v !== "string") return v;
+  if (/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(v)) return v;
+  var t = v.replace(/^[\s\u0000-\u001f\u007f-\u009f\u00a0\u1680\u180e\u2000-\u200f\u2028-\u202f\u205f-\u206f\u3000\ufeff]+/, "");
+  return /^[=+\-@']/.test(t) ? "'" + v : v;
 }
-function applyOne_(me, op, now) {
-  var t = op.table;
+// what only the server may change on a row the bank wrote or linked (a phone that's behind can't undo it)
+var BANK_OWNED_ = ["amount", "date", "bankId", "deleted", "account", "from", "to", "person", "source", "key"];
+function isBankRow_(t, r) { return !!r && ((t === "transactions" && !!r.bankId) || ((t === "moves" || t === "valuations") && /^bk-/.test(String(r.id)))); }
+// ids that tell a payday tick or an occurrence change apart: "x-<item>-<yyyy-mm-dd>…" for exceptions
+function exceptionIdOk_(id, item) {
+  var pre = "x-" + item + "-";
+  return !!item && String(id).indexOf(pre) === 0 && /^\d{4}-\d{2}-\d{2}(-[A-Za-z0-9_-]+)?$/.test(String(id).slice(pre.length));
+}
+// opts: {app: "peckish" for another app's key, sys: true for the server's own writes (the bank feed)}
+function applyOne_(me, op, now, by, opts) {
+  opts = opts || {};
+  var t = op.table, sys = !!opts.sys, app = opts.app || "";
   if (!SCHEMA[t]) throw new Error("Unknown table " + t);
   if (SERVER_ONLY[t]) throw new Error("The sheet fills in " + t + " itself");
-  var id = op.id || (op.row && op.row.id); if (!id) throw new Error("Missing id");
+  if (app) appAllowed_(app, me, t, op);
+  var src = op.row || op.fields || {};
+  var id = op.id || src.id || (t === "settings" && op.op !== "delete" && src.person && src.key ? src.person + ":" + src.key : ""); if (!id) throw new Error("Missing id");
+  id = String(id);
   var tab = readTable_(t), sh = tab.sheet || ensureTab_(ss_(), t);
   var existing = byId_(t, id);
   var row = existing ? strip_(existing) : {};
+  // a new row can't take an id that belongs to someone else's kind of row
+  if (!existing && !sys) {
+    if (/^bk-/.test(id)) throw new Error("That id is kept for the bank feed");
+    if (/^t-pk-/.test(id) && app !== "peckish") throw new Error("That id is kept for Peckish");
+    if (t === "settings" && (String(src.person) !== String(me) || id !== me + ":" + src.key)) throw new Error("A setting's id is your name and its key");
+    if (t === "exceptions" && !exceptionIdOk_(id, src.item)) throw new Error("A change to one date needs an id like x-<item>-<date>");
+  }
+  if (existing && t === "settings" && !sys && src.key !== undefined && String(src.key) !== String(existing.key)) throw new Error("A setting's key can't change");
+  var bankRow = !sys && isBankRow_(t, existing);
   if (op.op === "delete") { if (!existing) return; row.deleted = true; }
-  else { var src = op.row || op.fields || {}; for (var k in src) if (k !== "updated" && k !== "by" && k !== "_row") row[k] = src[k]; row.id = id; }
+  else {
+    for (var k in src) {
+      if (k === "updated" || k === "by" || k === "_row") continue;
+      if (!sys && k === "bankId") continue;   // only the bank feed links a payment to the bank
+      // a phone may only change these on a bank row: what it's for, the split, the note, and that it's checked
+      if (bankRow && BANK_OWNED_.indexOf(k) >= 0) { if (k === "deleted" && toBoolCell_(src[k]) && !toBoolCell_(existing.deleted)) row.deleted = true; continue; }
+      row[k] = src[k];
+    }
+    row.id = id;
+  }
+  if (app) appRowOk_(app, me, t, row, existing);
+  // the app and the bank both ticking the same payday move: the second one is kept, marked as a copy
+  if (!existing && !sys && t === "moves" && /^pay:/.test(String(row.key || "")) && !toBoolCell_(row.deleted)) {
+    var same = tab.rows.filter(function (r) { return r.key === row.key && r.person === row.person && !toBoolCell_(r.deleted); })[0];
+    if (same) { row.deleted = true; row.note = "Same payday move as " + same.id; }
+  }
   // people are set up in the sheet; you can change your own name or colour, never who your partner is
   if (t === "people") {
     if (!existing) throw new Error("People are added in the sheet");
     if (op.op === "delete") throw new Error("You can't delete a person");
     if (String(row.partner || "") !== String(existing.partner || "")) throw new Error("Partners are set in the sheet");
   }
-  var who = owner_(t, row);
-  if (who !== null && who.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")");
-  if (existing) { var ow = owner_(t, existing); if (ow !== null && ow.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")"); }
-  row.updated = now; row.by = me;
+  if (!sys) {
+    var who = owner_(t, row);
+    if (who !== null && who.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")");
+    if (existing) { var ow = owner_(t, existing); if (ow !== null && ow.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")"); }
+  }
+  row.updated = now; row.by = by || me;
   var head = tab.head.length ? tab.head : SCHEMA[t].concat(COMMON);
   Object.keys(row).forEach(function (k) { if (head.indexOf(k) < 0 && (SCHEMA[t].indexOf(k) >= 0 || COMMON.indexOf(k) >= 0)) { sh.getRange(1, head.length + 1).setValue(k); head.push(k); } });
   tab.head = head;
   var line = head.map(function (h) { return cell_(row[h]); });
   // keep the copy of the tab in step, rather than reading the whole tab again after every change
+  if (existing && HIDE_ROWS_[t]) noteHidden_(t, existing, row);
   if (existing) {
     sh.getRange(existing._row, 1, 1, line.length).setValues([line]);
     Object.keys(row).forEach(function (k) { existing[k] = row[k]; });
@@ -236,11 +378,117 @@ function applyOne_(me, op, now) {
   }
 }
 
+function toBoolCell_(v) { return v === true || /^(true|yes|1)$/i.test(String(v === undefined || v === null ? "" : v)); }
+
+// ---------- what another app's key may do ----------
+// Peckish: sees names, its person's budgets and accounts, the splits, and food shops; adds and changes only its own
+// food shops (ids t-pk-…, source peckish, for its person). Nothing else: no settings, no bank, no other tabs.
+var APP_RULES_ = {
+  peckish: {
+    write: {transactions: true},
+    reads: {people: ["id", "name"], budgets: ["id", "person", "name", "account", "mode"], splits: null, accounts: ["id", "owner", "name", "kind"], transactions: null},
+    food: /food|grocer/i
+  },
+  // Caledonite: no sync, no tables; only app.calendar (the person's own paydays, bills and fun money)
+  caledonite: {write: {}, reads: null, actions: {"app.calendar": true}}
+};
+// app.calendar: what Caledonite shows from Budgie, worked out here from exactly the rows the person's own phone gets
+// (so the partner's private bills and pay never come into it), and only the person's own items
+var CAL_FUN_RE_ = /fun|entertain|going out|leisure|social|date|treat/i;
+function calMoney_(n) {
+  var v = Math.round((+n || 0) * 100) / 100, neg = v < 0, a = Math.abs(v), whole = Math.floor(a), frac = Math.round((a - whole) * 100);
+  var w = String(whole).replace(/\B(?=(\d{3})+(?!\d))/g, ","), f = frac ? "." + (frac < 10 ? "0" + frac : String(frac)).replace(/0$/, "") : "";
+  return (neg ? "-£" : "£") + w + f;
+}
+function appCalendar_(me, snap) {
+  var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd"), db = Budgie.load(sync_(me, "", true, snap).rows, today), days = {};
+  (Budgie.coming(db, me, Budgie.addDays(today, -14), 120) || []).forEach(function (c) {
+    if (!c || !c.date) return;
+    var isPay = /payday/i.test(c.name || "") || c.table === "income";
+    if (!isPay && c.table !== "bills") return;
+    (days[c.date] = days[c.date] || []).push({name: isPay ? (c.name || "Payday") : String(c.name), sub: isPay ? (c.amount ? calMoney_(c.amount) : "") : c.amount ? "Bill, " + calMoney_(c.amount) : "Bill", pay: isPay, amount: c.amount || 0});
+  });
+  var fun = null;
+  try {
+    var per = Budgie.periodAt(db, me, today), plan = Budgie.planFor(db, me, per), st = Budgie.budgetState(db, me, per), left = 0, names = [];
+    (plan.lines || []).forEach(function (l) { if (l.kind !== "spend" || !CAL_FUN_RE_.test(l.name || "")) return; var x = st[l.id]; if (!x) return; left += Math.max(0, +x.left || 0); names.push(l.name); });
+    if (names.length) fun = {left: Math.round(left * 100) / 100, names: names, until: per.next || null};
+  } catch (e) { fun = null; }
+  return {ok: true, person: me, name: (Budgie.person(db, me) || {}).name || me, days: days, fun: fun, synced: snap.at};
+}
+function appAllowed_(app, me, t, op) {
+  var rule = APP_RULES_[app]; if (!rule || !rule.write[t]) throw new Error(NOT_ALLOWED_);
+  var id = String(op.id || (op.row && op.row.id) || "");
+  if (!/^t-pk-[A-Za-z0-9_-]+$/.test(id)) throw new Error(NOT_ALLOWED_);
+}
+function appRowOk_(app, me, t, row, existing) {
+  if (existing && (existing.person !== me || existing.source !== app)) throw new Error(NOT_ALLOWED_);
+  if (row.person !== me || row.source !== app) throw new Error(NOT_ALLOWED_);
+}
+function appSync_(me, app, since, full, snap) {
+  var rule = APP_RULES_[app], at = snap.at, tables = snap.tables, recent = function (r) { return (+r.updated || 0) > +since - 5000; };
+  full = full || !since;
+  var personRow = function (id) { return tables.people.filter(function (p) { return p.id === id; })[0] || null; };
+  var partner = (personRow(me) || {}).partner || "", pr = personRow(partner);
+  if (!partner || partner === me || !pr || pr.partner !== me) partner = "";
+  var sharing = {}; tables.settings.forEach(function (r) { if (r.person === partner && /^share\./.test(r.key)) sharing[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); });
+  var budName = {}; tables.budgets.forEach(function (b) { budName[b.id] = String(b.name || ""); });
+  var pick = function (r, cols) { if (!cols) return r; var o = {}; cols.concat(["deleted", "updated"]).forEach(function (c) { if (r[c] !== undefined) o[c] = r[c]; }); return o; };
+  var mineOnly = {budgets: "person", accounts: "owner"}, rows = {}, count = 0;
+  if (!full && tables.people.some(recent)) full = true;
+  Object.keys(rule.reads).forEach(function (t) {
+    rows[t] = [];
+    tables[t].forEach(function (r) {
+      if (!(full || recent(r))) return;
+      if (mineOnly[t] && r[mineOnly[t]] !== me) return;
+      if (t === "transactions") {
+        if (!canSee_(me, t, r, sharing)) return;
+        if (r.source === app || rule.food.test(budName[r.budget] || "")) rows[t].push(r);
+        else if (!full) rows[t].push({id: r.id, deleted: true});   // it may have been a food shop before
+        return;
+      }
+      rows[t].push(pick(r, rule.reads[t]));
+    });
+    count += rows[t].length;
+  });
+  var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd");
+  return {ok: true, person: me, app: app, keyType: "app", now: at, today: today, full: full, rows: rows, count: count, partnerSummary: null, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
+}
+
 // ---------- sync ----------
 // a copy of every tab, and the time it was taken (before reading, so nothing written after it is missed)
 function snapshot_() { var at = Date.now(); return {at: at, tables: allTables_()}; }
 // tables where one row can stop being visible on its own (a split taken off, a budget moved off a LISA)
 var HIDE_ROWS_ = {transactions: true, bills: true, budgets: true, income: true, moves: true, amounts: true, exceptions: true};
+// what someone shares, as their partner sees it
+function sharingOf_(p) { var s = {}; readTable_("settings").rows.forEach(function (r) { if (r.person === p && /^share\./.test(r.key)) s[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); }); return s; }
+function partnerOf_(p) {
+  var me = byId_("people", p), q = me && me.partner ? byId_("people", me.partner) : null;
+  return q && q.id !== p && q.partner === p ? q.id : "";
+}
+// a row someone could see that they now can't (a split taken off, a budget moved off a LISA): their phone is told to
+// drop it on its next sync. Only these are sent, so a partner never learns that private rows exist.
+// Kept in Script Properties, newest 60, for 60 days.
+function hiddenLog_() { try { return JSON.parse(PropertiesService.getScriptProperties().getProperty("HIDDEN_ROWS") || "[]"); } catch (e) { return []; } }
+function noteHidden_(t, before, after) {
+  var owners = owner_(t, before) || [], now = Date.now(), add = [];
+  readTable_("people").rows.forEach(function (q) {
+    if (!q.id || owners.indexOf(q.id) >= 0) return;
+    var o = owners.filter(function (x) { return partnerOf_(q.id) === x; })[0]; if (!o) return;
+    var sh = sharingOf_(o);
+    if (canSee_(q.id, t, before, sh) && !canSee_(q.id, t, after, sh)) {
+      add.push({t: t, i: before.id, q: q.id, a: now});
+      // the changes to a bill or budget go with it
+      if (t === "bills" || t === "budgets" || t === "income") ["amounts", "exceptions"].forEach(function (k) { readTable_(k).rows.forEach(function (r) { if (r.item === before.id) add.push({t: k, i: r.id, q: q.id, a: now}); }); });
+    }
+  });
+  if (!add.length) return;
+  var props = PropertiesService.getScriptProperties(), log = hiddenLog_().concat(add), cut = now - 60 * 86400000, dropped = 0;
+  log = log.filter(function (e) { if (e.a > cut) return true; return false; });
+  while (log.length > 60 || JSON.stringify(log).length > 8000) { dropped = Math.max(dropped, log[0].a); log.shift(); }
+  props.setProperty("HIDDEN_ROWS", JSON.stringify(log));
+  if (dropped) props.setProperty("HIDDEN_ROWS_DROPPED", String(Math.max(dropped, +props.getProperty("HIDDEN_ROWS_DROPPED") || 0)));
+}
 function sync_(me, since, full, snap) {
   snap = snap || snapshot_();
   var at = snap.at, tables = snap.tables, recent = function (r) { return (+r.updated || 0) > +since - 5000; };
@@ -251,6 +499,8 @@ function sync_(me, since, full, snap) {
   if (!partner || partner === me || !pr || pr.partner !== me) partner = "";
   var sharing = partner ? sharingOf(partner) : {};
   full = full || !since;
+  // the list of rows to drop was trimmed past this phone's last sync: send everything instead
+  if (!full && (+PropertiesService.getScriptProperties().getProperty("HIDDEN_ROWS_DROPPED") || 0) > +since - 5000) full = true;
   // what your partner shares, who is whose partner, or what kind an account is changed: send everything again,
   // so rows that just became visible arrive and rows that just became private go
   if (!full && (tables.settings.some(function (r) { return r.person === partner && /^share\./.test(r.key) && recent(r); }) || tables.people.some(recent) || tables.accounts.some(recent))) full = true;
@@ -263,9 +513,18 @@ function sync_(me, since, full, snap) {
         rows[t].push(r);
         // your partner's split payment names their budget, so the app can match it to yours ("Food")
         if (t === "transactions" && r.person !== me && r.budget) needStub[r.budget] = true;
-      } else if (!full && HIDE_ROWS_[t]) rows[t].push({id: r.id, deleted: true});   // it may have been visible before
+      }
     });
   });
+  // rows you could see before and now can't
+  if (!full) {
+    var hid = {}; hiddenLog_().forEach(function (e) { if (e.q === me && e.a > +since - 5000 && rows[e.t]) hid[e.t + "|" + e.i] = e; });
+    Object.keys(hid).forEach(function (k) {
+      var e = hid[k], r = tables[e.t].filter(function (x) { return x.id === e.i; })[0];
+      if (!r || canSee_(me, e.t, r, sharing) || rows[e.t].some(function (x) { return x.id === e.i; })) return;
+      rows[e.t].push({id: e.i, deleted: true});
+    });
+  }
   // the partner's budgets you can't see, cut down to what matching needs
   var sent = {}; rows.budgets.forEach(function (r) { if (!r.deleted) sent[r.id] = true; });
   rows.budgets = rows.budgets.filter(function (r) { return !(r.deleted && needStub[r.id]); });
@@ -273,7 +532,7 @@ function sync_(me, since, full, snap) {
   Object.keys(rows).forEach(function (t) { count += rows[t].length; });
   var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd"), summary = null;
   if (partner) summary = partnerSummary_(tables, partner, today);
-  return {ok: true, person: me, now: at, today: today, full: full, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
+  return {ok: true, person: me, keyType: "full", now: at, today: today, full: full, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
 }
 // worked out once per change and day, then kept for a few hours (each phone asks every minute)
 function partnerSummary_(tables, partner, today) {
@@ -345,6 +604,7 @@ function refreshBudgetTabs() {
 }
 // replaces only its own trigger, so the daily fund prices trigger (Prices.gs) keeps running
 function installTriggers() {
+  // (the bank feed's 15-minute trigger, installBankTrigger, and the prices trigger are left as they are)
   ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === "refreshBudgetTabs") ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger("refreshBudgetTabs").timeBased().everyHours(1).create();
   Logger.log("The budget tabs now refresh every hour, and a minute after any change from the app.");

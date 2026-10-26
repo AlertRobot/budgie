@@ -24,8 +24,8 @@
         {id: "s-lisa", owner: "sam", name: "Lifetime ISA", kind: "lisa", order: 8}
       ],
       income: [
-        {id: "a-pay", person: "alex", name: "Pay", amount: 2650, account: "a-main", isPay: true, unit: "month", on: "last friday", start: add(start, -40)},
-        {id: "s-pay", person: "sam", name: "Pay", amount: 1980, account: "s-main", isPay: true, unit: "month", on: "28", shift: "previous working day", start: add(start, -40)}
+        {id: "a-pay", person: "alex", name: "Pay", amount: 2400, account: "a-main", isPay: true, unit: "month", on: "last friday", start: add(start, -40)},
+        {id: "s-pay", person: "sam", name: "Pay", amount: 2150, account: "s-main", isPay: true, unit: "month", on: "28", shift: "previous working day", start: add(start, -40)}
       ],
       bills: [
         {id: "a-rent", person: "alex", name: "Rent", category: "home", amount: 1100, account: "a-bills", split: "rent", unit: "month", on: "15", shift: "next working day", start: add(start, -40)},
@@ -65,7 +65,7 @@
         {id: "s-bills-t", from: "sam", to: "alex", name: "Bills share", amount: 115, fromAccount: "s-rent", toAccount: "a-bills", unit: "month", on: "1", start: add(start, -40)}
       ],
       transactions: [], moves: [], settlements: [],
-      loans: [{id: "sofa", lender: "alex", borrower: "sam", name: "Sofa and furniture", amount: 520, date: add(start, 5), repay: 150, repayFrom: add(today, 20), repayDay: "28"}],
+      loans: [{id: "sofa", lender: "alex", borrower: "sam", name: "New sofa", amount: 600, date: add(start, 5), repay: 150, repayFrom: add(today, 20), repayDay: "28"}],
       goals: [
         {id: "g-house", owners: "alex, sam", name: "House deposit", kind: "house", target: 60000, due: add(today, 365 * 4), accounts: "a-lisa, s-lisa", price: 280000},
         {id: "g-rainy", owners: "alex", name: "Rainy day fund", kind: "emergency", target: 4500, accounts: "a-rainy"},

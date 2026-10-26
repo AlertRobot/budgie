@@ -1,7 +1,7 @@
 # Budgie: how it fits together
 
-One app, two people, one Google Sheet. The app never talks to a bank. Everything it shows is worked out
-from **rules you set once** (pay, bills, budgets, splits) plus **what actually happened** (payments you log,
+One app, two people, one Google Sheet. Phones never talk to a bank. If you connect Monzo or Starling, the sheet's script reads them (read-only) and
+adds what it finds. Everything else is worked out from **rules you set once** (pay, bills, budgets, splits) plus **what actually happened** (payments you log,
 pot moves you tick off, balances you check now and then).
 
 ```
@@ -40,7 +40,7 @@ People are `ethan` and `sophie`. Money is in pounds. Dates are real dates.
 | `income` | money that comes in on a schedule | id, person, name, amount, account, isPay, *schedule* |
 | `bills` | money that goes out on a schedule | id, person (who pays), name, category, amount, account, split, variable, *schedule* |
 | `budgets` | a spending or saving line per pay period | id, person, name, amount, mode (daily, weekly, oneoff, saving, remainder), account, to, carry |
-| `splits` | how two people share something | id, name, shares ("ethan:2, sophie:1" or "sophie=375") |
+| `splits` | how two people share something | id, name, shares ("ethan:2, sophie:1" or "sophie=400") |
 | `transfers` | one person paying the other on a schedule | id, from, to, amount, fromAccount, toAccount, purpose, *schedule* |
 | `transactions` | a payment you logged | id, date, person, amount, budget, account, split, note, source |
 | `moves` | a pot move you ticked off | id, date, person, from, to, amount, key |
@@ -55,7 +55,7 @@ People are `ethan` and `sophie`. Money is in pounds. Dates are real dates.
 
 *Schedule* columns (income, bills, transfers): `unit` (month, week, year, once, dates), `every` (1, 2, 4…),
 `on` (15, last, last working day, last friday, 1st monday…), `shift` (next working day, previous working day),
-`start`, `end`, `dates` (a list, for things like NMC: 4 Jan, 1 Apr, 1 Jul).
+`start`, `end`, `dates` (a list, for things like a membership renewed on 10 Feb, 10 May and 10 Aug).
 
 ## What the engine works out
 
@@ -69,7 +69,7 @@ People are `ethan` and `sophie`. Money is in pounds. Dates are real dates.
 - **To do**: payday moves, moving money back when something was paid from the wrong pot, covering an overspend
   from the fallback pot, topping up a pot before a bill. A move is only suggested if the money is really there.
 - **Between you two**: shared bills and split payments by their split rule (for example 2 parts to 1), minus what
-  has been paid, so you always know who owes whom and by how much. Loans (furniture) are kept separate.
+  has been paid, so you always know who owes whom and by how much. Loans between you are kept separate.
 - **Goals, LISA, house, net worth, insights, calendar.**
 
 ## Privacy between partners

@@ -58,7 +58,7 @@ const T = s => (s || "").replace(/\s+/g, " ").trim();
   await visitAll(page, "ethan");
   // log a payment from the main account for fuel
   await page.click('nav [data-v="add"]');
-  await page.click('[data-a="addpick"][data-v="budget:e-fuel"]'); await page.click('[data-a="addpick"][data-v="account:e-main"]');
+  await page.click('[data-a="addbud"][data-v="e-fuel"]'); await page.click('[data-a="addfrom"]'); await page.click('#sheets [data-a="addfrom2"][data-v="e-main"]');
   await page.fill("#addAmt", "35");
   await page.click('[data-a="addsave"]'); await page.waitForTimeout(1200);
   console.log("after log:", T(await page.textContent("#toast")), "|", T(await page.textContent("main")).slice(0, 400));
@@ -71,11 +71,11 @@ const T = s => (s || "").replace(/\s+/g, " ").trim();
   await page.click('nav [data-v="more"]'); await page.click('main [data-v="payday"]'); await shot(page, "21-payday", true);
   await page.click('[data-a="payedit"]'); await page.fill("#payAmt", "2900"); await page.click('[data-a="paysave"]'); await page.waitForTimeout(1200);
   console.log("payday after:", T(await page.textContent("main")).slice(0, 300));
-  // change VOXI from 15 to 18 from today
-  await page.click('nav [data-v="more"]'); await page.click('main [data-v="bills"]'); await page.click('[data-a="edit"][data-v="bills:e-voxi"]');
-  await page.fill('[data-f="amount"]', "18"); await page.click('[data-a="editsave"]'); await page.waitForTimeout(100); await page.click('[data-a="amtwhen"][data-v="today"]'); await page.waitForTimeout(1200);
+  // change the phone bill from 20 to 24 from today
+  await page.click('nav [data-v="more"]'); await page.click('main [data-v="bills"]'); await page.click('[data-a="edit"][data-v="bills:e-phone"]');
+  await page.fill('[data-f="amount"]', "24"); await page.click('[data-a="editsave"]'); await page.waitForTimeout(100); await page.click('[data-a="amtwhen"][data-v="today"]'); await page.waitForTimeout(1200);
   const am = await (await page.request.get("http://localhost:8790/dump?amounts")).json(); console.log("amounts:", am.map(r => r.item + " " + r.amount + " from " + r.start));
-  const voxi = (await (await page.request.get("http://localhost:8790/dump?bills")).json()).find(r => r.id === "e-voxi"); console.log("voxi base amount still", voxi.amount);
+  const phone = (await (await page.request.get("http://localhost:8790/dump?bills")).json()).find(r => r.id === "e-phone"); console.log("phone base amount still", phone.amount);
   // Coming up: mark one as didn't happen
   await page.click('nav [data-v="today"]'); const occ = await page.$('.swipe .face'); if (occ) { await occ.click(); await page.waitForTimeout(100); await shot(page, "22-occ-sheet"); await page.click('[data-a="occdo"][data-v^="skip"]'); await page.waitForTimeout(1200); }
   const ex = await (await page.request.get("http://localhost:8790/dump?exceptions")).json(); console.log("exceptions:", ex.map(r => r.item + " " + r.action + " " + r.date));

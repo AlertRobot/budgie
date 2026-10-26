@@ -27,7 +27,9 @@ function makeEnv() {
   // like typing into a cell: ISO date strings become dates
   // a leading apostrophe keeps text as text and isn't stored, like in Sheets
   function parseIn(x) { if (typeof x === "string" && x[0] === "'") return x.slice(1); if (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x)) { const [y, m, d] = x.split("-").map(Number); return new Date(y, m - 1, d); } return x; }
-  const triggers = [], cache = {};
+  const triggers = [], cache = {}, userProps = {};
+  // Script Properties (everyone with edit access to the script can see them) and the owner's User Properties
+  const propStore = (store) => ({getProperty: (k) => store[k] ?? null, setProperty: (k, v) => { store[k] = String(v); }, getProperties: () => ({...store}), deleteProperty: (k) => { delete store[k]; }});
   const newTrigger = (fn) => { const b = new Proxy({}, {get: (t, k) => k === "create" ? () => { const tr = {getHandlerFunction: () => fn}; triggers.push(tr); return tr; } : () => b}); return b; };
   const ss = {
     getSheetByName: (n) => sheets[n] || null, insertSheet: (n) => (sheets[n] = Sheet(n)), getSpreadsheetTimeZone: () => "Europe/London", getSheets: () => Object.values(sheets),
@@ -36,16 +38,17 @@ function makeEnv() {
   const ctx = {
     console, Date, JSON, Math, Object, Array, String, Number, RegExp, Error,
     SpreadsheetApp: {getActiveSpreadsheet: () => ss, openById: () => ss, flush: () => {}},
-    PropertiesService: {getScriptProperties: () => ({getProperty: (k) => props[k] ?? null, setProperty: (k, v) => { props[k] = String(v); }, getProperties: () => ({...props})})},
+    PropertiesService: {getScriptProperties: () => propStore(props), getUserProperties: () => propStore(userProps)},
     LockService: {getScriptLock: () => ({waitLock: () => {}, releaseLock: () => {}})},
     ContentService: {createTextOutput: (t) => ({setMimeType: () => ({text: t, json: () => JSON.parse(t)})}), MimeType: {JSON: "json"}},
     Utilities: {
       formatDate: (d, tz, f) => f === "yyyy-MM-dd" ? d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0") : d.toISOString(),
-      getUuid: () => require("crypto").randomUUID(), base64EncodeWebSafe: (s) => Buffer.from(s).toString("base64url")
+      getUuid: () => require("crypto").randomUUID(), base64EncodeWebSafe: (s) => Buffer.from(s).toString("base64url"),
+      DigestAlgorithm: {SHA_256: "sha256"}, computeDigest: (alg, s) => Array.from(require("crypto").createHash(alg).update(String(s)).digest()).map(b => b > 127 ? b - 256 : b), sleep: () => {}
     },
     Logger: {log: (x) => logs.push(String(x))},
     ScriptApp: {getService: () => ({getUrl: () => "https://script.google.com/macros/s/TEST/exec"}), getProjectTriggers: () => triggers.slice(), newTrigger: newTrigger, deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); }},
-    CacheService: {getScriptCache: () => ({get: (k) => cache[k] ?? null, put: (k, v) => { cache[k] = v; }})}
+    CacheService: {getScriptCache: () => ({get: (k) => cache[k] ?? null, put: (k, v) => { cache[k] = v; }, remove: (k) => { delete cache[k]; }})}
   };
   vm.createContext(ctx);
   const dir = path.join(__dirname, "..");
@@ -53,6 +56,6 @@ function makeEnv() {
   vm.runInContext(fs.readFileSync(path.join(dir, "apps-script/Code.gs"), "utf8"), ctx, {filename: "Code.gs"});
   const prices = path.join(dir, "apps-script/Prices.gs");
   if (fs.existsSync(prices)) vm.runInContext(fs.readFileSync(prices, "utf8"), ctx, {filename: "Prices.gs"});
-  return {ctx, sheets, props, logs, ss, triggers, cache, Sheet};
+  return {ctx, sheets, props, userProps, logs, ss, triggers, cache, Sheet};
 }
 module.exports = makeEnv;

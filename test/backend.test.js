@@ -108,7 +108,7 @@ const phone = (F, k) => { const P = {T: {}, since: 0}; P.sync = (ops) => { const
 // #3 actual pay, pay rises and private bill changes aren't sent to the partner
 {
   const F = fresh(t => {
-    t.exceptions.push({id: "x-actual", item: "s-pay", date: "2026-11-27", action: "amount", amount: 1729.28}, {id: "x-split", item: "e-flat", date: "2026-11-01", action: "amount", amount: 480});
+    t.exceptions.push({id: "x-actual", item: "s-pay", date: "2026-11-27", action: "amount", amount: 2050}, {id: "x-split", item: "e-flat", date: "2026-11-01", action: "amount", amount: 480});
     t.amounts.push({id: "a-rise", item: "s-pay", start: "2027-04-01", amount: 2400}, {id: "a-lisa", item: "s-lisa-b", start: "2027-01-01", amount: 300});
     t.accounts.push({id: "s-lisa", owner: "sophie", name: "LISA", kind: "lisa"}); t.budgets.push({id: "s-lisa-b", person: "sophie", name: "LISA", amount: 250, mode: "saving", account: "s-lisa"});
   });
@@ -134,7 +134,7 @@ const phone = (F, k) => { const P = {T: {}, since: 0}; P.sync = (ops) => { const
 }
 
 // #5 the response says which engine it runs
-{ const F = fresh(); ok("#5 engine version", F.call({key: F.kE}).engine === "1.3.0" && B.VERSION === "1.3.0"); }
+{ const F = fresh(); ok("#5 engine version", F.call({key: F.kE}).engine === B.VERSION && /^\d+\.\d+\.\d+$/.test(B.VERSION)); }
 
 // #16 the partner's split payment matches your budget on your own phone; partner start date and LISA moves arrive
 {
@@ -191,8 +191,9 @@ const phone = (F, k) => { const P = {T: {}, since: 0}; P.sync = (ops) => { const
   ok("#18 and every change is in the sheet", rows.filter(x => /^n\d+$/.test(x.id)).length === 40 && rows.find(x => x.id === "n3").amount === 5 && rows.find(x => x.id === "n3").date === "2026-10-28");
   ok("#18 the reply has the new rows", r.rows.transactions.filter(x => /^n\d+$/.test(x.id)).length === 40, r.rows.transactions.length);
   // the partner summary is worked out once per change, not on every poll
-  const s1 = F.call({key: F.kE}); const cached = Object.keys(F.env.cache).length; const s2 = F.call({key: F.kE});
-  ok("#18 partner summary kept between polls", cached === 1 && JSON.stringify(s1.partnerSummary) === JSON.stringify(s2.partnerSummary) && Object.keys(F.env.cache).length === 1);
+  const sums = () => Object.keys(F.env.cache).filter(k => /^sum:/.test(k)).length;
+  const s1 = F.call({key: F.kE}); const cached = sums(); const s2 = F.call({key: F.kE});
+  ok("#18 partner summary kept between polls", cached === 1 && JSON.stringify(s1.partnerSummary) === JSON.stringify(s2.partnerSummary) && sums() === 1);
 }
 
 // #23 hardening: formulas stay text, no keys in URLs
@@ -221,11 +222,144 @@ const phone = (F, k) => { const P = {T: {}, since: 0}; P.sync = (ops) => { const
   ok("installTriggers keeps the daily prices trigger", JSON.stringify(names) === JSON.stringify(["refreshBudgetTabs", "updatePrices"]), names);
 }
 
+// ================= app keys (S1b), key checks (S7), reserved ids (S4), formula guard (S10) =================
+{
+  const F = fresh(t => {
+    t.transactions.push(
+      {id: "e-food-1", date: "2026-10-27", person: "ethan", amount: 30, budget: "e-food-b", account: "e-food", note: "Big shop"},
+      {id: "e-fun-1", date: "2026-10-27", person: "ethan", amount: 18, budget: "e-fun", account: "e-main", note: "Cinema"},
+      {id: "s-food-split", date: "2026-10-27", person: "sophie", amount: 40, budget: "s-food", account: "s-main", split: "half", note: "Shared shop"},
+      {id: "s-food-private", date: "2026-10-27", person: "sophie", amount: 22, budget: "s-food", account: "s-main", note: "Her own shop"});
+    t.settings.push({id: "ethan:theme", person: "ethan", key: "theme", value: "dark"});
+  });
+  const {c, env, call, kE, kS} = F;
+  // appLink makes a key the first time and logs a normal connect link
+  const link = c.appLink("ethan", "peckish"), m = link.match(/^(https:\/\/[^#]+)#connect=([A-Za-z0-9_-]+)$/);
+  const cfg = m && JSON.parse(Buffer.from(m[2], "base64url").toString());
+  ok("S1b: appLink logs a connect link", m && m[1] === "https://alertrobot.github.io/es-kitchen/" && cfg.u === "https://script.google.com/macros/s/TEST/exec" && /^app_peckish_[0-9a-f]{64}$/.test(cfg.k) && env.logs.some(l => l === "Ethan (Peckish): " + link), link);
+  ok("S1b: the key lives with the script's properties", env.props.APPKEY_ethan_peckish === cfg.k);
+  ok("S1b: running it again gives the same key", c.appLink("ethan", "peckish") === link);
+  const kP = cfg.k;
+  ok("S1b: ping says which app", JSON.stringify(call({key: kP, action: "ping"})) === JSON.stringify({ok: true, person: "ethan", app: "peckish", keyType: "app"}));
+  const ps = call({key: kP, full: true});
+  ok("S1b: Peckish sync works", ps.ok && ps.app === "peckish" && ps.keyType === "app" && ps.partnerSummary === null, ps.error);
+  ok("S1b: only the tables it needs", JSON.stringify(Object.keys(ps.rows).sort()) === JSON.stringify(["accounts", "budgets", "people", "splits", "transactions"]), Object.keys(ps.rows));
+  ok("S1b: people are names only", ps.rows.people.every(p => JSON.stringify(Object.keys(p).filter(k => k !== "deleted" && k !== "updated").sort()) === '["id","name"]') && !JSON.stringify(ps.rows.people).includes("Monzo"), ps.rows.people);
+  ok("S1b: only Ethan's budgets and accounts, cut down", ps.rows.budgets.every(b => b.person === "ethan" && b.amount === undefined && b.carry === undefined) && ps.rows.budgets.length === 5 && ps.rows.accounts.every(a => a.owner === "ethan" && a.purpose === undefined && a.order === undefined));
+  const ids = ps.rows.transactions.map(t => t.id).sort();
+  ok("S1b: only food shops (his, and the one Sophie split with him)", JSON.stringify(ids) === JSON.stringify(["e-food-1", "s-food-split"]), ids);
+  // writes
+  const w = call({key: kP, ops: [
+    {op: "put", table: "transactions", row: {id: "t-pk-1", date: "2026-10-28", person: "ethan", amount: 52.3, budget: "e-food-b", account: "e-main", note: "Tesco (Peckish)", source: "peckish"}},
+    {op: "put", table: "transactions", row: {id: "t-pk-2", date: "2026-10-28", person: "sophie", amount: 5, budget: "s-food", source: "peckish"}},
+    {op: "put", table: "transactions", row: {id: "t-pk-3", date: "2026-10-28", person: "ethan", amount: 5, budget: "e-food-b"}},
+    {op: "put", table: "transactions", row: {id: "app-1", date: "2026-10-28", person: "ethan", amount: 5, budget: "e-food-b", source: "peckish"}},
+    {op: "put", table: "transactions", row: {id: "e-fun-1", amount: 1}},
+    {op: "put", table: "settings", row: {id: "ethan:theme", person: "ethan", key: "theme", value: "light"}},
+    {op: "put", table: "budgets", row: {id: "e-food-b", amount: 999}},
+    {op: "delete", table: "transactions", id: "e-food-1"}
+  ]});
+  ok("S1b: Peckish can add its own food shop", w.ok && w.applied.map(x => x.id).join() === "t-pk-1", w.applied);
+  ok("S1b: and nothing else", w.rejected.map(x => x.i).join() === "1,2,3,4,5,6,7" && w.rejected.every(x => x.error === "That's not allowed with this link"), w.rejected);
+  ok("S1b: it can change and delete its own rows", call({key: kP, ops: [{op: "put", table: "transactions", row: {id: "t-pk-1", amount: 50, source: "peckish", person: "ethan"}}, {op: "delete", table: "transactions", id: "t-pk-1"}]}).applied.length === 2);
+  ok("S1b: no bank actions", call({key: kP, action: "bank.status"}).error === "That's not allowed with this link" && call({key: kP, action: "bank.disconnect"}).ok === false);
+  ok("S1b: no calendar for Peckish", call({key: kP, action: "app.calendar"}).ok === false);
+  // a delta sync still works, and a shop that's no longer food leaves Peckish
+  const ds = call({key: kP, since: ps.now});
+  ok("S1b: delta sync", ds.ok && ds.full === false && ds.rows.transactions.some(t => t.id === "t-pk-1"), ds.rows && ds.rows.transactions);
+  call({key: kE, ops: [{op: "put", table: "transactions", row: {id: "e-food-1", budget: "e-fun"}}]});
+  const ds2 = call({key: kP, since: ds.now});
+  ok("S1b: a payment moved off food is dropped from Peckish", ds2.rows.transactions.some(t => t.id === "e-food-1" && t.deleted === true && t.amount === undefined), ds2.rows.transactions);
+  // Budgie keys can't take Peckish's ids
+  ok("S4: a Budgie key can't make t-pk- or bk- rows", call({key: kE, ops: [{op: "put", table: "transactions", row: {id: "t-pk-9", date: "2026-10-28", person: "ethan", amount: 1, source: "peckish"}}, {op: "put", table: "transactions", row: {id: "bk-monzo-x", date: "2026-10-28", person: "ethan", amount: 1}}]}).rejected.length === 2);
+  // rotating the Peckish key
+  c.newAppKey("ethan", "peckish");
+  ok("S1b: the old Peckish key stops working at once (even though it was cached)", call({key: kP, action: "ping"}).ok === false && env.props.APPKEY_ethan_peckish !== kP);
+  ok("S1b: newKey(person, app) rotates an app key too", (c.newKey("ethan", "peckish"), env.props.APPKEY_ethan_peckish && /^app_peckish_/.test(env.props.APPKEY_ethan_peckish)));
+  ok("S1b: Ethan's own key still works", call({key: kE, action: "ping"}).ok === true);
+  ok("S1b: unknown app", (() => { try { c.appLink("ethan", "evil"); return false; } catch (e) { return /doesn't know/.test(e.message); } })());
+
+  // Caledonite: only the calendar
+  const cal = JSON.parse(Buffer.from(c.appLink("sophie", "caledonite").split("#connect=")[1], "base64url").toString()).k;
+  ok("Caledonite: no sync", call({key: cal}).error === "That's not allowed with this link" && call({key: cal, full: true}).ok === false && call({key: cal, ops: [{op: "put", table: "transactions", row: {id: "t-1", person: "sophie", amount: 1}}]}).ok === false);
+  ok("Caledonite: no bank", call({key: cal, action: "bank.status"}).ok === false);
+  const cs = call({key: cal, action: "app.calendar"});
+  ok("Caledonite: the calendar", cs.ok && cs.person === "sophie" && cs.name === "Sophie" && typeof cs.synced === "number" && cs.days && typeof cs.days === "object", cs);
+  const flat = Object.keys(cs.days).sort().reduce((a, d) => a.concat(cs.days[d].map(x => Object.assign({date: d}, x))), []);
+  ok("Caledonite: her paydays and bills only", flat.length > 0 && flat.every(x => x.pay ? /^(£.*)?$/.test(x.sub) : /^Bill, £/.test(x.sub)) && flat.some(x => x.pay) && flat.some(x => !x.pay), flat.slice(0, 6));
+  ok("Caledonite: none of Ethan's bills or pay", !flat.some(x => /^(Rent|Phone|Household bills)$/.test(x.name)) && !JSON.stringify(cs).includes("Ethan"), flat.map(x => x.name));
+  const dbS = B.load(call({key: kS, full: true}).rows, cs.days ? Object.keys(cs.days).sort()[0] : "2026-10-26");
+  ok("Caledonite: same as Sophie's phone works out", JSON.stringify(cs.days) === JSON.stringify((() => { const today = new Intl.DateTimeFormat("en-CA", {timeZone: "Europe/London"}).format(new Date()), db = B.load(call({key: kS, full: true}).rows, today), out = {};
+    B.coming(db, "sophie", B.addDays(today, -14), 120).forEach(c2 => { const isPay = /payday/i.test(c2.name || "") || c2.table === "income"; if (!isPay && c2.table !== "bills") return; (out[c2.date] = out[c2.date] || []).push({name: isPay ? (c2.name || "Payday") : String(c2.name), sub: isPay ? (c2.amount ? c.calMoney_(c2.amount) : "") : c2.amount ? "Bill, £" + (Math.round(c2.amount * 100) / 100).toLocaleString("en-GB", {minimumFractionDigits: 0, maximumFractionDigits: 2}) : "Bill", pay: isPay, amount: c2.amount || 0}); }); return out; })()));
+  ok("Caledonite: fun until payday", cs.fun && cs.fun.names.indexOf("Fun") >= 0 && typeof cs.fun.left === "number" && /^\d{4}-\d{2}-\d{2}$/.test(cs.fun.until), cs.fun);
+  ok("Caledonite: a Budgie key can ask for its own calendar too", call({key: kE, action: "app.calendar"}).person === "ethan");
+  ok("calendar money looks like Caledonite's", c.calMoney_(1100) === "£1,100" && c.calMoney_(8.5) === "£8.5" && c.calMoney_(12.05) === "£12.05" && c.calMoney_(0.84) === "£0.84");
+
+  // S7: a key that isn't the right shape is turned away before the properties are read
+  const gp = c.PropertiesService.getScriptProperties; let reads = 0;
+  c.PropertiesService.getScriptProperties = () => { const p = gp(); const all = p.getProperties; p.getProperties = () => { reads++; return all(); }; return p; };
+  ["nope", "x".repeat(64), "A".repeat(64), "app_peckish_" + "z".repeat(64), "' OR 1=1"].forEach(k => call({key: k, action: "ping"}));
+  ok("S7: malformed keys don't read the properties", reads === 0, reads);
+  call({key: kS, action: "ping"}); const r1 = reads; call({key: kS, action: "ping"}); call({key: kS, action: "ping"});
+  ok("S7: a good key is looked up once, then cached for 10 minutes", r1 <= 1 && reads === r1, {r1, reads});
+  const wrong = "0".repeat(64); call({key: wrong, action: "ping"}); const r2 = reads; call({key: wrong, action: "ping"});
+  ok("S7: a well-formed wrong key is remembered too", reads === r2 && call({key: wrong, action: "ping"}).ok === false);
+  c.PropertiesService.getScriptProperties = gp;
+  const oldS = env.props.KEY_sophie; c.newKey("sophie");
+  ok("S7: a changed key stops working at once", call({key: oldS, action: "ping"}).ok === false && call({key: env.props.KEY_sophie, action: "ping"}).person === "sophie");
+}
+// linking apps from the app itself (a person's own full key), and keyType
+{
+  const F = fresh(), {call, kE, kS, env} = F;
+  ok("keyType full on every sync", call({key: kE}).keyType === "full" && call({key: kE, full: true}).keyType === "full" && call({key: kE, action: "ping"}).keyType === "full");
+  ok("app.status: nothing linked yet", JSON.stringify(call({key: kE, action: "app.status"}).apps) === JSON.stringify({peckish: false, caledonite: false}));
+  const l1 = call({key: kE, action: "app.link", app: "peckish"});
+  const k1 = l1.ok && JSON.parse(Buffer.from(l1.link.split("#connect=")[1], "base64url").toString());
+  ok("app.link: a normal connect link for the app", l1.ok && /^https:\/\/alertrobot\.github\.io\/es-kitchen\/#connect=/.test(l1.link) && k1.u === "https://script.google.com/macros/s/TEST/exec" && /^app_peckish_[0-9a-f]{64}$/.test(k1.k) && env.props.APPKEY_ethan_peckish === k1.k, l1);
+  ok("app.link: the new key works, as an app key", JSON.stringify(call({key: k1.k, action: "ping"})) === JSON.stringify({ok: true, person: "ethan", app: "peckish", keyType: "app"}));
+  const l2 = call({key: kE, action: "app.link", app: "peckish"}), k2 = JSON.parse(Buffer.from(l2.link.split("#connect=")[1], "base64url").toString()).k;
+  ok("app.link again: a new key, and the old copy is cut off", k2 !== k1.k && call({key: k1.k, action: "ping"}).ok === false && call({key: k2, action: "ping"}).ok === true);
+  ok("app.status shows it", JSON.stringify(call({key: kE, action: "app.status"}).apps) === JSON.stringify({peckish: true, caledonite: false}) && call({key: kS, action: "app.status"}).apps.peckish === false);
+  ok("an app key can't link, unlink or list apps", ["app.link", "app.unlink", "app.status"].every(a => call({key: k2, action: a, app: "caledonite"}).error === "That's not allowed with this link"));
+  ok("an app key can't do anything it isn't for", call({key: k2, action: "whatever"}).error === "That's not allowed with this link");
+  ok("app.link: unknown app refused", call({key: kE, action: "app.link", app: "evil"}).ok === false);
+  ok("app.unlink: the key is gone", call({key: kE, action: "app.unlink", app: "peckish"}).ok && !env.props.APPKEY_ethan_peckish && call({key: k2, action: "ping"}).ok === false && call({key: kE, action: "app.status"}).apps.peckish === false);
+  ok("Sophie's link is her own", (call({key: kS, action: "app.link", app: "caledonite"}), call({key: kS, action: "app.status"}).apps.caledonite === true && call({key: kE, action: "app.status"}).apps.caledonite === false));
+}
+// S4: ids that belong to someone else
+{
+  const F = fresh(t => { t.bills.push({id: "e", person: "sophie", name: "Odd", amount: 1, account: "s-main", unit: "once", start: "2026-12-01"}); });
+  const {call, kE, kS} = F;
+  const r = call({key: kS, ops: [
+    {op: "put", table: "settings", row: {id: "ethan:share.totals", person: "sophie", key: "share.totals", value: "false"}},
+    {op: "put", table: "settings", row: {id: "ethan:share.totals", person: "ethan", key: "share.totals", value: "false"}},
+    {op: "put", table: "settings", row: {person: "sophie", key: "share.cats", value: "false"}},
+    {op: "put", table: "exceptions", row: {id: "x-e-pay-2026-10-29-amount", item: "e", date: "2026-10-29", action: "amount", amount: 1}},
+    {op: "put", table: "exceptions", row: {id: "x-e-pay-2026-10-29-amount", item: "e-pay", date: "2026-10-29", action: "amount", amount: 1}},
+    {op: "put", table: "exceptions", row: {id: "x-s-pay-2026-11-27-amount", item: "s-pay", date: "2026-11-27", action: "amount", amount: 1}},
+    {op: "put", table: "exceptions", row: {id: "something", item: "s-pay", date: "2026-11-27", action: "amount", amount: 1}}
+  ]});
+  ok("S4: Sophie can't squat Ethan's setting or exception ids", r.rejected.map(x => x.i).join() === "0,1,3,4,6" && r.applied.map(x => x.id).join() === "sophie:share.cats,x-s-pay-2026-11-27-amount", r);
+  ok("S4: Ethan's setting is still free", call({key: kE, ops: [{op: "put", table: "settings", row: {id: "ethan:share.totals", person: "ethan", key: "share.totals", value: "true"}}]}).applied.length === 1);
+  ok("S4: a setting's key can't be changed under its id", call({key: kE, ops: [{op: "put", table: "settings", row: {id: "ethan:share.totals", key: "share.payments"}}]}).rejected.length === 1);
+}
+// S10: what reaches a cell
+{
+  const F = fresh(), c = F.c;
+  const cases = {"=1+1": "'=1+1", " =HYPERLINK(\"x\")": "' =HYPERLINK(\"x\")", "\t+SUM(A1)": "'\t+SUM(A1)", "​@x": "'​@x", "-x": "'-x", "'kept": "''kept", "+44 7700 900000": "'+44 7700 900000",
+    "-20": "-20", "12.50": "12.50", "2026-10-28": "2026-10-28", "e-food-b": "e-food-b", "Tesco": "Tesco", "pay:2026-10-29:e-lisa": "pay:2026-10-29:e-lisa"};
+  const bad = Object.keys(cases).filter(k => c.cell_(k) !== cases[k]).map(k => [k, c.cell_(k)]);
+  ok("S10: formulas and apostrophes kept as text; numbers, dates and ids as they are", !bad.length && c.cell_(5) === 5 && c.cell_(true) === true && c.cell_(null) === "", bad);
+  F.call({key: F.kE, ops: [{op: "put", table: "transactions", row: {id: "t-f1", date: "2026-10-28", person: "ethan", amount: 1, budget: "e-fun", note: " =IMPORTDATA(\"https://x\")"}}, {op: "put", table: "transactions", row: {id: "t-f2", date: "2026-10-28", person: "ethan", amount: 1, budget: "e-fun", note: "'quoted'"}}]});
+  F.c.CACHE_ = {}; const rows = F.c.readTable_("transactions").rows;
+  ok("S10: and read back as typed", rows.find(r => r.id === "t-f1").note === " =IMPORTDATA(\"https://x\")" && rows.find(r => r.id === "t-f2").note === "'quoted'");
+}
+
 // #5 the one-file backend (apps-script/Budgie.gs, made by migrate/build.js) must be built from the current files
 {
   const fs = require("fs"), path = require("path"), dir = path.join(__dirname, ".."), bundle = path.join(dir, "apps-script/Budgie.gs");
   if (fs.existsSync(bundle)) {
-    const b = fs.readFileSync(bundle, "utf8"), parts = ["engine.js", "apps-script/Code.gs", "apps-script/Prices.gs"].filter(f => fs.existsSync(path.join(dir, f)));
+    const b = fs.readFileSync(bundle, "utf8"), parts = ["engine.js", "apps-script/Code.gs", "apps-script/Prices.gs", "apps-script/BankFeeds.gs", "apps-script/Extras.gs"].filter(f => fs.existsSync(path.join(dir, f)));
     const stale = parts.filter(f => b.indexOf(fs.readFileSync(path.join(dir, f), "utf8")) < 0);
     ok("#5 Budgie.gs is up to date (run node migrate/build.js)", !stale.length, stale);
   }
