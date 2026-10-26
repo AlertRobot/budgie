@@ -1,7 +1,7 @@
 // Offline support for Budgie. Bump VERSION whenever any file changes.
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 const CACHE = "budgie-" + VERSION;
-const FILES = ["./", "./index.html", "./app.js", "./engine.js", "./demo.js", "./themes.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
+const FILES = ["./", "./index.html", "./app.js", "./engine.js", "./demo.js", "./themes.js", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png", "./maskable-512.png", "./icon.svg"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES.map(f => new Request(f, {cache: "reload"})))).then(() => self.skipWaiting())); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k.startsWith("budgie-") && k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener("fetch", e => {
