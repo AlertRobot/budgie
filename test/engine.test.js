@@ -87,6 +87,23 @@ eq("furniture repayments", ln.plan.map(r => [r.date, r.amount]), [["2026-12-28",
 const bal = B.balances(e, "2026-11-16");
 near("bills pot after rent, VOXI, flat bills and Sophie's shares", bal["e-bills"], 80 + 150 + 400 - 450 - 15 - 1100);
 
+// --- parents paying straight into the LISA: saved, not spendable, and you still move your own share
+const pa = db(t => { t.income.push({id: "e-par", person: "ethan", name: "Parents' LISA top-up", amount: 167, account: "e-lisa", unit: "month", on: "1", start: "2026-11-01"}); });
+const paPer = B.periodAt(pa, "ethan", "2026-11-05"), basePl = B.planFor(e, "ethan", B.periodAt(e, "ethan", "2026-11-05")), paPl = B.planFor(pa, "ethan", paPer);
+near("parents' top-up doesn't swell the ISA remainder", paPl.lines.find(l => l.id === "e-isa-b").amount, basePl.lines.find(l => l.id === "e-isa-b").amount);
+near("payday still moves your own LISA saving", (B.payday(pa, "ethan", paPer).moves.find(m => m.to === "e-lisa") || {}).amount, 333);
+near("parents' top-up counts as saved", paPl.totals.save - basePl.totals.save, 167);
+const L1 = B.lisa(pa, "e-lisa", "2026-10-26");
+eq("LISA: planned to 5 April counts paydays and the parents", L1.taxYearEnd, "2027-04-05");
+near("LISA: on course (6 paydays x 333 + 6 top-ups x 167)", L1.planned, 6 * 333 + 6 * 167);
+const pb = db(t => { t.settings.push({person: "ethan", key: "lisa.paidBefore.e-lisa", value: "2500"}); });
+near("LISA: paid before Budgie counts towards the limit", B.lisa(pb, "e-lisa", "2026-10-26").paidThisYear, 2500);
+near("LISA: going over the limit is flagged", B.lisa(pb, "e-lisa", "2026-10-26").overBy, 2500 + 6 * 333 - 4000);
+
+// --- things to check
+const ck = db(t => { t.settings.push({person: "ethan", key: "check:e-home", value: JSON.stringify({t: "Is £50 right?", a: "edit", v: "budgets:e-home", o: 2})}, {person: "ethan", key: "check:pots", value: JSON.stringify({t: "Pots", a: "go", v: "pots", o: 1})}, {person: "ethan", key: "check:old", value: "done"}, {person: "sophie", key: "check:s", value: JSON.stringify({t: "Hers"})}); });
+eq("checks: open ones, in order, only mine", B.checks(ck, "ethan").map(c => c.id), ["pots", "e-home"]);
+
 // --- whole picture runs without errors for both, across a year
 ["ethan", "sophie"].forEach(p => {
   for (let d = "2026-10-26"; d < "2027-11-01"; d = B.addDays(d, 17)) { B.today(e, p, d); B.pots(e, p, d); B.year(e, p, d); B.summary(e, p, d); }

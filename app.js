@@ -1,7 +1,7 @@
 /* Budgie app: screens, syncing and offline queue. The maths lives in engine.js. */
 (function () {
   "use strict";
-  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.0.1";
+  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.1.0";
   var $ = function (s) { return document.querySelector(s); };
   var esc = function (s) { return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]; }); };
   var LS = {get: function (k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }};
@@ -181,6 +181,7 @@
     bills: function () { return ["Bills", "Calendar and subscriptions"]; }, goals: function () { return ["Goals", "Saving for things"]; }, lisa: function () { return ["LISA tracker", "Lifetime ISA"]; },
     house: function () { return ["House", "Deposit and mortgage"]; }, networth: function () { return ["Net worth", "Own minus owe"]; }, debts: function () { return ["Debts and IOUs", "Who owes what"]; },
     insights: function () { return ["Insights", "How your spending is going"]; }, gifts: function () { return ["Gifts", "Ideas and what you've bought"]; }, settings: function () { return ["Settings", person().name]; },
+    checks: function () { return ["Things to check", "Settings"]; },
     edit: function () { return [S.view.p.title || "Edit", "Settings"]; }, list: function () { return [S.view.p.title || "", "Settings"]; }, themes: function () { return ["Themes", "How Budgie looks"]; },
     sharing: function () { return ["Partner and sharing", "What " + (person(partner()).name || "your partner") + " sees"]; }, sync: function () { return ["Google Sheet", "Sync and backup"]; }, importcsv: function () { return ["Import", "Bank statement"]; },
     connect: function () { return ["Budgie", "Connect your sheet"]; }
@@ -209,6 +210,10 @@
     var fn = SCREENS[S.view.s] || SCREENS.today, html = "";
     try { html = fn(S.view.p); } catch (e) { html = card('<h2>Something went wrong</h2><p class="muted small">' + esc(e && e.message) + '</p><button class="btn ghost sm" type="button" data-a="tab" data-v="today">Back to Today</button>'); console.error(e); }
     $("#main").innerHTML = (demoOn() ? '<button type="button" class="banner demo li" data-a="demoinfo" style="padding:10px 14px;border:0;color:var(--accent-ink)"><span class="grow"><span class="what">Show and tell is on</span><span class="why" style="color:inherit;opacity:.9">Made-up people and money. Tap to switch person or turn it off.</span></span></button>' : "") + html;
+    // once a day, until they're all confirmed, pop up the figures Budgie guessed
+    if (S.view.s === "today" && !S.ui.checkShown && !sheetOpen() && S.lastSync && LS.get("budgie.checkSeen", "") !== todayIso() && checkList().length) {
+      S.ui.checkShown = true; LS.set("budgie.checkSeen", todayIso()); setTimeout(function () { if (!sheetOpen() && S.view.s === "today") checksSheet(); }, 500);
+    }
   }
 
   // ---------- screens ----------
@@ -462,7 +467,9 @@
       var vals = L.series.map(function (x) { return x.amount; }), whose = a.owner === me() ? "Your" : esc(person(a.owner).name) + "'s";
       html += card('<div class="small muted">' + whose + " Lifetime ISA</div>" + '<div class="row" style="align-items:center"><span style="font-size:32px;font-weight:800;font-family:var(--head)">' + M0(L.balance) + "</span>" + (a.owner === me() ? '<button type="button" class="btn ghost sm" data-a="potcheck" data-v="' + esc(a.id) + '">Update</button>' : "") + "</div>" +
         (vals.some(function (v) { return v; }) ? chart(vals, 320, 130, {label: "Balance over two years"}) + '<div class="row tiny muted"><span>2 years ago</span><span>Now</span></div>' : "") +
-        '<div style="margin-top:12px"><div class="row small"><span style="font-weight:600">This tax year (6 Apr to 5 Apr)</span><span class="num">' + M0(L.paidThisYear) + " of £4,000</span></div>" + '<div style="margin-top:6px">' + bar(L.paidThisYear / 40) + '</div><div class="small muted" style="margin-top:4px">About ' + M(L.bonusThisYear) + " bonus · " + M0(L.allowanceLeft) + " left you can pay in</div></div>");
+        '<div style="margin-top:12px"><div class="row small"><span style="font-weight:600">This tax year (6 Apr to 5 Apr)</span><span class="num">' + M0(L.paidThisYear) + " of £4,000</span></div>" + '<div style="margin-top:6px">' + bar(L.paidThisYear / 40) + '</div><div class="small muted" style="margin-top:4px">About ' + M(L.bonusThisYear) + " bonus · " + M0(L.allowanceLeft) + " left you can pay in</div>" +
+        (L.planned ? '<div class="small" style="margin-top:8px">On course for ' + M0(L.onCourse) + " by 5 April" + (L.overBy ? '. <span class="warn">That\'s ' + M(L.overBy) + " over the £4,000 limit, and your provider turns away anything over it. Pay in a little less before then.</span>" : L.onCourse >= 3999.5 ? '. <span class="good">That\'s the full £1,000 bonus.</span>' : ".") + "</div>" : "") +
+        (a.owner === me() ? '<button type="button" class="btn ghost sm" style="margin-top:8px" data-a="lisapaid" data-v="' + esc(a.id) + '">' + (L.paidBefore ? "Paid in before Budgie: " + M0(L.paidBefore) : "Add what you paid in before Budgie") + "</button>" : "") + "</div>");
     });
     if (mineFirst.length > 1) html += card('<div class="row"><span style="font-weight:700">Together</span>' + num(M0(together)) + "</div>");
     html += '<div class="banner small"><b>The rules Budgie keeps an eye on.</b> Up to £4,000 a year, plus a 25% government bonus (up to £1,000). For a first home up to £450,000. Taking money out for anything else costs 25%. The government plans to replace the LISA with a new first-time-buyer account from April 2028; existing LISAs carry on for now.</div>';
@@ -557,14 +564,35 @@
     return (html || '<p class="empty">No gift ideas yet. Only you can see your list, so surprises stay surprises.</p>') + '<button type="button" class="btn dash" data-a="new" data-v="gifts">Add a gift idea</button>';
   };
 
+  // ----- Things to check (figures Budgie had to guess when it was set up)
+  function checkList() { return demoOn() || !me() ? [] : B.checks(db(), me()); }
+  function checkRows(list) {
+    return list.map(function (c) {
+      return '<div class="li" style="flex-wrap:wrap;gap:8px"><span class="grow" style="min-width:200px"><span class="what">' + esc(c.text) + "</span></span>" +
+        '<span style="display:flex;gap:8px;margin-left:auto">' + (c.action ? '<button type="button" class="btn sm" data-a="chk" data-v="' + esc(c.id) + '">Change</button>' : "") +
+        '<button type="button" class="btn ghost sm" data-a="chkok" data-v="' + esc(c.id) + '">' + (c.action ? "It's right" : "Done") + "</button></span></div>";
+    }).join("");
+  }
+  SCREENS.checks = function () {
+    var list = checkList();
+    if (!list.length) return '<p class="empty">All checked. Nice. Everything Budgie guessed has been confirmed.</p>';
+    return '<p class="small muted" style="margin:0 4px 10px">When Budgie was set up it had to guess a few figures. Change them, or tell Budgie they\'re right.</p>' + card('<div class="list">' + checkRows(list) + "</div>", "flush");
+  };
+  function checksSheet() {
+    var list = checkList(); if (!list.length) return;
+    openSheet('<h2>A few things to check</h2><p class="muted">Budgie guessed these when it was set up. Change any that are wrong, or tell it they\'re right. You can find them later in Settings.</p><div class="list">' + checkRows(list) + '</div><button type="button" class="btn ghost wide" style="margin-top:12px" data-a="sheetclose">Later</button>');
+  }
+  function markChecked(id) { if (id && !demoOn() && /^\{/.test(String(getSetting("check:" + id, "")))) setting("check:" + id, "done"); }
+
   // ----- Settings
   SCREENS.settings = function () {
-    var w = cap(potWord(true)), groups = [
+    var w = cap(potWord(true)), todo = checkList(), groups = [
       ["You", [["list:income", "Pay and money coming in", "Paydays, pay rises, one-offs"], ["account", "Your account", (person().name || "") + " · " + (person().bank || "")]]],
       ["Your money", [["bills", "Bills and subscriptions", "Add, change or stop a bill"], ["list:budgets", "Budgets", "Food, fun and the rest"], ["list:accounts", w, "What each one is for"], ["goals", "Goals", "House, car, holidays"], ["gifts", "Gifts", "Ideas and spending"]]],
       ["Together", [["sharing", "Partner and sharing", "What " + (person(partner()).name || "your partner") + " can see"], ["list:splits", "How you split things", "For example 2 parts to 1"], ["list:transfers", "Regular payments to " + (person(partner()).name || "partner"), "Like your rent share"], ["debts", "Money owed between you", "Furniture and the like"]]],
       ["App", [["themes", "Themes", themeLabel()], ["toggle:easy", "Easy read", isEasy() ? "On: simpler screens in an easy-to-read font" : "Simpler screens in an easy-to-read font"], ["toggle:hide", "Hide amounts", S.prefs.hide ? "On: tap the eye to peek" : "Cover numbers with £••••"], ["toggle:demo", "Show and tell", demoOn() ? "On: sample data" : "Show the app off with made-up money"], ["sync", "Google Sheet and sync", demoOn() ? "Not used in Show and tell" : syncLabel()], ["importcsv", "Import a bank statement", "Add payments from a CSV file"]]]
     ];
+    if (todo.length) groups.unshift(["To check", [["checks", todo.length + " thing" + (todo.length === 1 ? "" : "s") + " Budgie guessed", "Confirm or change them"]]]);
     return groups.map(function (g) {
       return '<div class="secthead">' + esc(g[0]) + "</div>" + card('<div class="list">' + g[1].map(function (it) {
         if (/^toggle:/.test(it[0])) { var k = it[0].slice(7), on = k === "easy" ? isEasy() : k === "hide" ? S.prefs.hide : demoOn(); return '<label class="li check" style="padding:12px 0"><span class="grow"><span class="what">' + esc(it[1]) + '</span><span class="why">' + esc(it[2]) + '</span></span><input type="checkbox" data-c="toggle" data-v="' + k + '"' + (on ? " checked" : "") + "></label>"; }
@@ -715,7 +743,7 @@
     var amountChanged = EDIT.id && /bills|income|transfers|budgets/.test(t) && +EDIT.orig.amount !== +r.amount && EDIT.orig.amount !== "" && (EDIT.orig.start || "2000-01-01") < now;
     var finish = function (fromToday) {
       if (fromToday) { var newAmt = r.amount; r.amount = EDIT.orig.amount; put("amounts", {id: newId("amt"), item: r.id, start: now, amount: newAmt}, true); }
-      put(t, r, true); toast("Saved" + (fromToday ? ": the new amount counts from today" : "")); back();
+      put(t, r, true); markChecked(r.id); toast("Saved" + (fromToday ? ": the new amount counts from today" : "")); back();
     };
     if (amountChanged) {
       openSheet('<h2>From when?</h2><p class="muted">You changed it from ' + B.money(EDIT.orig.amount) + " to " + B.money(r.amount) + '.</p><button type="button" class="btn wide" data-a="amtwhen" data-v="today">From today (earlier months keep ' + B.money(EDIT.orig.amount) + ')</button><button type="button" class="btn ghost wide" style="margin-top:10px" data-a="amtwhen" data-v="always">Always (it was a mistake)</button>');
@@ -830,7 +858,21 @@
       put("exceptions", {id: "x-" + o.item + "-" + o.date + "-amount", item: o.item, date: o.date, action: "amount", amount: a}); closeSheet(); toast("Pay set to " + B.money(a) + ". Everything has re-sorted.");
     },
     potcheck: function (v) { var a = db().byId[v]; S.ui.potCheck = v; openSheet("<h2>" + esc(a.name) + '</h2><p class="muted">What does your ' + esc(person().bank || "bank") + ' app show right now? Budgie starts again from this.</p><label class="f">Balance<input type="text" inputmode="decimal" id="potBal" placeholder="£"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="potsave">Save</button>'); },
-    potsave: function () { var a = +String(($("#potBal") || {}).value || "").replace(/[£,\s]/g, ""); if (isNaN(a) || ($("#potBal") || {}).value === "") return; put("valuations", {id: newId("val"), account: S.ui.potCheck, date: todayIso(), amount: a}); closeSheet(); toast("Thanks. Budgie has caught up."); },
+    potsave: function () { var a = +String(($("#potBal") || {}).value || "").replace(/[£,\s]/g, ""); if (isNaN(a) || ($("#potBal") || {}).value === "") return; put("valuations", {id: newId("val"), account: S.ui.potCheck, date: todayIso(), amount: a}, true); markChecked(S.ui.potCheck); closeSheet(); toast("Thanks. Budgie has caught up."); render(); },
+    chk: function (v) {
+      var c = checkList().filter(function (x) { return x.id === v; })[0]; if (!c) return;
+      closeSheet(true);
+      if (c.action === "edit") { var k = c.value.split(":"); openEditor(k[0], k[1]); }
+      else if (c.action === "potcheck") ACT.potcheck(c.value);
+      else if (c.action === "lisapaid") ACT.lisapaid(c.value);
+      else if (c.action === "go") go(c.value);
+    },
+    chkok: function (v) { setting("check:" + v, "done"); if (sheetOpen() && checkList().length) checksSheet(); else closeSheet(); toast("Thanks"); render(); },
+    lisapaid: function (v) {
+      S.ui.lisaAcc = v; var cur = getSetting("lisa.paidBefore." + v, "");
+      openSheet('<h2>Paid in since 6 April</h2><p class="muted">Your LISA app shows how much has gone in this tax year (yours and anyone else\'s). Budgie adds what comes next, so it can warn you before you go over £4,000.</p><label class="f">Paid in before ' + esc(B.nice(B.startOf(db(), me()))) + '<input type="text" inputmode="decimal" id="lisaPaid" value="' + esc(cur) + '" placeholder="£"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="lisapaidsave">Save</button>');
+    },
+    lisapaidsave: function () { var raw = ($("#lisaPaid") || {}).value || "", a = +String(raw).replace(/[£,\s]/g, ""); if (raw === "" || isNaN(a)) return; setting("lisa.paidBefore." + S.ui.lisaAcc, a); markChecked("lisapaid-" + S.ui.lisaAcc); closeSheet(); toast("Saved"); render(); },
     edit: function (v) { var k = v.split(":"); openEditor(k[0], k[1]); }, "new": function (v) { openEditor(v, null); },
     editsave: function () { saveEditor(); },
     amtwhen: function (v) { closeSheet(true); if (S.ui.amtFinish) S.ui.amtFinish(v === "today"); },

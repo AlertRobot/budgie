@@ -6,7 +6,7 @@
   else root.Budgie = factory();
 })(this, function () {
   "use strict";
-  var VERSION = "1.0.0";
+  var VERSION = "1.1.0";
 
   // ---------- dates ----------
   function D(s) { var p = String(s).split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
@@ -294,7 +294,14 @@
   function plan0(db, p, per, noTopup) {
     var lines = [], partner = partnerOf(db, p), main = mainOf(db, p), st = startOf(db, p), from = per.start, to = per.next;
     var live = function (d) { return d >= st; };
-    db.income.filter(function (i) { return i.person === p; }).forEach(function (i) { occurrences(db, i, from, to).forEach(function (o) { if (live(o.date)) lines.push({kind: "in", name: i.name, amount: o.amount, account: i.account || main, date: o.date, id: i.id, occ: o.key, isPay: i.isPay, actual: !!o.actual}); }); });
+    db.income.filter(function (i) { return i.person === p; }).forEach(function (i) {
+      occurrences(db, i, from, to).forEach(function (o) {
+        if (!live(o.date)) return;
+        lines.push({kind: "in", name: i.name, amount: o.amount, account: i.account || main, date: o.date, id: i.id, occ: o.key, isPay: i.isPay, actual: !!o.actual});
+        // money paid straight into a savings account (parents topping up a LISA) is saved, not spendable
+        if (i.account && i.account !== main && savingKind(db, i.account)) lines.push({kind: "save", name: i.name, amount: o.amount, account: i.account, date: o.date, id: i.id, direct: true});
+      });
+    });
     db.transfers.forEach(function (t) {
       occurrences(db, t, from, to).forEach(function (o) {
         if (!live(o.date)) return;
@@ -680,7 +687,34 @@
     db.valuations.forEach(function (v) { if (v.account === accId && v.date < first) first = v.date; });
     var acc = db.byId[accId]; if (first === "9999" && acc) first = startOf(db, acc.owner);
     for (var i = 23; i >= 0; i--) { var d = ymd(+date.slice(0, 4), +date.slice(5, 7) - 1 - i, 1); if (i === 0) d = date; if (d >= first) series.push({date: d, amount: accountValue(db, accId, d)}); }
-    return {account: accId, name: accName(db, accId), balance: bal, paidThisYear: paid, allowanceLeft: round(Math.max(0, 4000 - paid)), bonusThisYear: bonus, taxYearStart: tys, series: series};
+    // paid in before Budgie started tracking (from the person's Moneybox app), so the £4,000 limit is right
+    var before = acc ? +setting(db, acc.owner, "lisa.paidBefore." + accId, 0) || 0 : 0;
+    if (before && tys <= startOf(db, acc.owner)) paid = round(paid + before);
+    bonus = round(Math.min(1000, paid * 0.25));
+    // what's still planned to go in before the tax year ends: savings on each payday and money paid straight in
+    var tyEnd = addDays(ymd(+tys.slice(0, 4) + 1, 3, 6), -1), planned = 0, owner = acc ? acc.owner : "";
+    if (owner) {
+      db.budgets.forEach(function (b) {
+        if (b.person !== owner || b.mode !== "saving" || b.account !== accId) return;
+        payDates(db, owner, addDays(date, 1), addDays(tyEnd, 1)).forEach(function (d) { if ((!b.start || d >= b.start) && (!b.end || d <= b.end)) planned += amountAt(db, b, d); });
+      });
+      db.income.forEach(function (i) { if (i.account === accId) occurrences(db, i, addDays(date, 1), addDays(tyEnd, 1)).forEach(function (o) { planned += o.amount; }); });
+    }
+    var onCourse = round(paid + planned);
+    return {account: accId, name: accName(db, accId), balance: bal, paidThisYear: paid, paidBefore: before, allowanceLeft: round(Math.max(0, 4000 - paid)), bonusThisYear: bonus, taxYearStart: tys, taxYearEnd: tyEnd,
+      planned: round(planned), onCourse: onCourse, overBy: round(Math.max(0, onCourse - 4000)), series: series};
+  }
+
+  // ---------- things to check ----------
+  // settings rows "check:<id>" hold {t: what to check, a: action, v: what it opens}; "done" once confirmed
+  function checks(db, p) {
+    var s = db.set[p] || {}, out = [];
+    Object.keys(s).forEach(function (k) {
+      if (!/^check:/.test(k) || !s[k] || /^done$/i.test(String(s[k]))) return;
+      var c; try { c = JSON.parse(s[k]); } catch (e) { c = {t: String(s[k])}; }
+      out.push({id: k.slice(6), key: k, text: c.t || "", action: c.a || "", value: c.v || "", order: +c.o || 50});
+    });
+    return out.sort(function (a, b) { return a.order - b.order; });
   }
   function netWorth(db, p, date) {
     var bal = balances(db, date), own = 0, owe = 0, rows = [];
@@ -729,7 +763,7 @@
     load: load, occurrences: occurrences, scheduleDates: scheduleDates, isWorkingDay: isWorkingDay, bankHolidays: bankHolidays,
     periods: periods, periodAt: periodAt, prevPeriod: prevPeriod, nextPeriod: nextPeriod, planFor: planFor, payday: payday,
     budgetState: budgetState, balances: balances, flows: flows, todo: todo, between: between, today: today, coming: coming,
-    calendar: calendar, pots: pots, monthView: monthView, year: year, goals: goals, lisa: lisa, netWorth: netWorth, loans: loans,
+    calendar: calendar, pots: pots, monthView: monthView, year: year, goals: goals, lisa: lisa, checks: checks, netWorth: netWorth, loans: loans,
     summary: summary, shareOf: shareOf, amountAt: amountAt, setting: setting, partnerOf: partnerOf, mainOf: mainOf, fallbackOf: fallbackOf,
     accountsOf: accountsOf, accName: accName, person: person, startOf: startOf,
     money: money, nice: nice, describe: describe, addDays: addDays, diff: diff, parseDate: parseDate, isIso: isIso, round: round
