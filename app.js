@@ -1,7 +1,7 @@
 /* Budgie app: screens, syncing and offline queue. The maths lives in engine.js. */
 (function () {
   "use strict";
-  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.3.0";
+  var B = window.Budgie, TH = window.BudgieThemes, APP_VERSION = "1.3.1";
   var $ = function (s) { return document.querySelector(s); };
   var esc = function (s) { return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function (c) { return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]; }); };
   var LS = {get: function (k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }};
@@ -110,9 +110,11 @@
       merge(j.rows, j.full);
       S.data.since = rej.length && !j.full ? 0 : j.now; S.data.me = j.person; S.data.summary = j.partnerSummary;
       S.newVersion = j.engine && newer(j.engine, B.VERSION) ? j.engine : null; // only when the sheet is ahead of this phone
+      // when the sheet's code is updated, fetch everything once: it may now send things it didn't before (new tabs, say)
+      var upgraded = !!(j.engine && S.data.serverEngine !== j.engine && !j.full); if (j.engine) S.data.serverEngine = j.engine;
       persist(); dirty(); S.lastSync = Date.now(); S.lastError = "";
       applyPersonPrefs();
-      if (S.data.queue.length || (rej.length && !j.full)) setTimeout(function () { sync(rej.length && !j.full); }, 60); // a full refresh puts back the sheet's copy of anything turned down
+      if (S.data.queue.length || ((rej.length || upgraded) && !j.full)) setTimeout(function () { sync((rej.length || upgraded) && !j.full); }, 60); // a full refresh puts back the sheet's copy of anything turned down
     } catch (e) { S.lastError = navigator.onLine === false ? "Offline: changes will sync when you're back online" : String(e && e.message || e); }
     finally { S.syncing = false; render(true); }
   }
