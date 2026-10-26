@@ -94,8 +94,12 @@ function handle_(b) {
     var me = whoIs_(b.key);
     if (b.action === "ping") return json_({ok: true, person: me});
     var applied = [];
-    if (b.ops && b.ops.length) { lock.waitLock(25000); applied = applyOps_(me, b.ops); SpreadsheetApp.flush(); lock.releaseLock(); }
-    var out = sync_(me, b.since || "", !!b.full);
+    // reads take the lock too, so a sync never sees half of another phone's batch and skips the rest
+    lock.waitLock(25000);
+    try {
+      if (b.ops && b.ops.length) { applied = applyOps_(me, b.ops); SpreadsheetApp.flush(); }
+      var out = sync_(me, b.since || "", !!b.full);
+    } finally { lock.releaseLock(); }
     out.applied = applied;
     if (applied.length) { try { maybeRefreshViews_(); } catch (x) { out.viewError = String(x); } }
     return json_(out);
@@ -193,7 +197,7 @@ function applyOps_(me, ops) {
 
 // ---------- sync ----------
 function sync_(me, since, full) {
-  var tables = allTables_(), sharingOf = function (p) { var s = {}; tables.settings.forEach(function (r) { if (r.person === p && /^share\./.test(r.key)) s[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); }); return s; };
+  var at = Date.now(), tables = allTables_(), sharingOf = function (p) { var s = {}; tables.settings.forEach(function (r) { if (r.person === p && /^share\./.test(r.key)) s[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); }); return s; };
   var partner = (tables.people.filter(function (p) { return p.id === me; })[0] || {}).partner || "";
   var sharing = sharingOf(partner), rows = {}, count = 0;
   Object.keys(tables).forEach(function (t) {
@@ -202,7 +206,7 @@ function sync_(me, since, full) {
   });
   var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd"), summary = null;
   if (partner) { try { summary = Budgie.summary(Budgie.load(tables, today), partner, today); } catch (x) { summary = {error: String(x)}; } }
-  return {ok: true, person: me, now: Date.now(), today: today, full: full || !since, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
+  return {ok: true, person: me, now: at, today: today, full: full || !since, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
 }
 
 // ---------- the official budget tabs ("Ethan budget", "Sophie budget") ----------
