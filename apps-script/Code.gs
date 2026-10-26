@@ -32,8 +32,11 @@ var SCHEMA = {
   exceptions: ["id", "item", "date", "action", "newDate", "amount", "note"],
   settings: ["id", "person", "key", "value"],
   gifts: ["id", "person", "name", "idea", "occasion", "date", "limit", "cost", "bought", "notes"],
+  prices: ["id", "fund", "date", "price", "source"],
   meta: ["key", "value"]
 };
+// tables only this script writes: the app can read them but never change them
+var SERVER_ONLY = {meta: true, prices: true};
 var HELP = {
   people: "One row per person.", accounts: "Every bank account, pot, Space, ISA and LISA. kind: main, pot, saving, isa, lisa, pension, credit. fallback = TRUE on the one pot that covers going over budget.",
   income: "Money that comes in on a schedule. isPay = TRUE for your salary (it sets your pay periods).", bills: "Money that goes out on a schedule. split: a row id from splits if you share it.",
@@ -42,7 +45,7 @@ var HELP = {
   settlements: "One-off payments between you two. loan: a row id from loans if it repays one.", loans: "Money one of you owes the other. repay: amount each month from repayFrom.",
   goals: "owners: who it belongs to. accounts: which accounts count towards it.", valuations: "A balance you checked. Everything after its date is worked out.",
   amounts: "A price or pay change for a bill, income or budget, from the start date.", exceptions: "A change to one date: skip, move (newDate) or amount (what it really was).",
-  settings: "Settings for each person.", gifts: "Gift ideas and what you bought. Only you see your own list.", meta: "Housekeeping."
+  settings: "Settings for each person.", gifts: "Gift ideas and what you bought. Only you see your own list.", prices: "Fund prices for the LISA tracker, filled in by the script.", meta: "Housekeeping."
 };
 
 // ---------- setup ----------
@@ -82,29 +85,34 @@ function ensureTab_(ss, t) {
 }
 
 // ---------- web ----------
-function doGet(e) { return handle_((e && e.parameter) || {}); }
+// keys only travel in POST bodies, never in a URL (where they'd end up in logs and history)
+function doGet(e) { return json_({ok: true, app: "Budgie", note: "The app talks to this with POST."}); }
 function doPost(e) {
   var body = {};
   try { body = JSON.parse((e && e.postData && e.postData.contents) || "{}"); } catch (x) {}
   return handle_(body);
 }
+// ok:false only when the whole request fails (wrong key, the sheet busy). Changes that can't be saved come back
+// in rejected [{i, table, id, error}] (i = position in the batch); every other change was saved.
 function handle_(b) {
-  var lock = LockService.getScriptLock();
+  var lock = LockService.getScriptLock(), locked = false;
   try {
     var me = whoIs_(b.key);
     if (b.action === "ping") return json_({ok: true, person: me});
-    var applied = [];
-    // reads take the lock too, so a sync never sees half of another phone's batch and skips the rest
-    lock.waitLock(25000);
+    var applied = [], rejected = [], snap;
+    // reads take the lock too, so a sync never sees half of another phone's batch and skips the rest;
+    // the lock covers writing and taking a copy of the tables, the working out happens after it's released
+    lock.waitLock(25000); locked = true;
     try {
-      if (b.ops && b.ops.length) { applied = applyOps_(me, b.ops); SpreadsheetApp.flush(); }
-      var out = sync_(me, b.since || "", !!b.full);
-    } finally { lock.releaseLock(); }
-    out.applied = applied;
+      if (Array.isArray(b.ops) && b.ops.length) { var res = applyOps_(me, b.ops); applied = res.applied; rejected = res.rejected; if (applied.length) SpreadsheetApp.flush(); }
+      snap = snapshot_();
+    } finally { lock.releaseLock(); locked = false; }
+    var out = sync_(me, b.since || "", !!b.full, snap);
+    out.applied = applied; out.rejected = rejected;
     if (applied.length) { try { maybeRefreshViews_(); } catch (x) { out.viewError = String(x); } }
     return json_(out);
   } catch (err) {
-    try { lock.releaseLock(); } catch (x) {}
+    if (locked) { try { lock.releaseLock(); } catch (x) {} }
     return json_({ok: false, error: String(err && err.message || err)});
   }
 }
@@ -133,12 +141,15 @@ function readTable_(t) {
   CACHE_[t] = {head: head, rows: rows, sheet: sh}; return CACHE_[t];
 }
 function allTables_() { var t = {}; Object.keys(SCHEMA).forEach(function (k) { t[k] = readTable_(k).rows.map(strip_); }); return t; }
+// rows by id, built once per read of a tab (the first row wins if an id is ever repeated)
+function index_(t) { var tab = readTable_(t); if (!tab.idx) { tab.idx = {}; tab.rows.forEach(function (r) { if (r.id !== undefined && r.id !== "" && !tab.idx[r.id]) tab.idx[r.id] = r; }); } return tab.idx; }
 function strip_(r) { var o = {}; for (var k in r) if (k !== "_row") o[k] = r[k]; return o; }
 function setMeta_(k, v) { var t = readTable_("meta"), row = t.rows.filter(function (r) { return r.key === k; })[0]; if (row) t.sheet.getRange(row._row, 2).setValue(v); else t.sheet.appendRow([k, v]); CACHE_.meta = null; }
 
 // ---------- who may see and change what ----------
 function owner_(t, r) {
   switch (t) {
+    case "people": return [r.id];
     case "accounts": return [r.owner];
     case "income": case "bills": case "budgets": case "transactions": case "moves": case "settings": case "gifts": return [r.person];
     case "transfers": case "settlements": return [r.from, r.to];
@@ -146,67 +157,150 @@ function owner_(t, r) {
     case "goals": return String(r.owners || "").split(/[,\s]+/);
     case "valuations": var a = byId_("accounts", r.account); return a ? [a.owner] : [];
     case "amounts": case "exceptions": var it = itemOwner_(r.item); return it;
-    default: return null; // people, splits, meta: shared
+    default: return null; // splits, prices, meta: shared
   }
 }
-function byId_(t, id) { return readTable_(t).rows.filter(function (r) { return r.id === id; })[0] || null; }
-function itemOwner_(id) {
-  var tabs = ["income", "bills", "budgets", "transfers", "loans"];
-  for (var i = 0; i < tabs.length; i++) { var r = byId_(tabs[i], id); if (r) return owner_(tabs[i], r); }
-  return [];
+function byId_(t, id) { return index_(t)[id] || null; }
+var ITEM_TABS_ = ["income", "bills", "budgets", "transfers", "loans"];
+function findItem_(id) {
+  for (var i = 0; i < ITEM_TABS_.length; i++) { var r = byId_(ITEM_TABS_[i], id); if (r) return {t: ITEM_TABS_[i], row: r}; }
+  return null;
 }
+function itemOwner_(id) { var it = findItem_(id); return it ? owner_(it.t, it.row) : []; }
+function isLisa_(accId) { var a = accId ? byId_("accounts", accId) : null; return !!a && /lisa/.test(String(a.kind)); }
 function canSee_(me, t, r, sharing) {
-  if (t === "meta") return true;
+  if (t === "meta" || t === "prices") return true;
   var o = owner_(t, r); if (o === null || o.indexOf(me) >= 0) return true;
-  // the partner's own things: names and shared items only
+  // the partner's own things: names, shared items, and their LISA (it counts towards the house)
   if (t === "accounts" || t === "people") return true;
-  if (t === "transactions") return !!r.split || sharing.payments;
-  if (t === "settings") return /^share\.|^theme|^colour/.test(String(r.key));
-  if (t === "bills") return !!r.split || sharing.payments;
-  if (t === "valuations") { var a = byId_("accounts", r.account); return sharing.payments || (a && /lisa/.test(a.kind)); }
-  if (t === "income" || t === "budgets") return sharing.payments;
-  if (t === "amounts" || t === "exceptions") return true;
+  if (t === "transactions") return !!r.split || !!sharing.payments;
+  if (t === "settings") return /^(share\.|theme|colour|start$|lisa\.)/.test(String(r.key));
+  if (t === "bills") return !!r.split || !!sharing.payments;
+  if (t === "valuations") return !!sharing.payments || isLisa_(r.account);
+  if (t === "income" || t === "budgets") return !!sharing.payments || isLisa_(r.account);
+  if (t === "moves") return isLisa_(r.to) || isLisa_(r.from);
+  // a price change or a one-off change is only as visible as the thing it changes (an actual pay, a private bill)
+  if (t === "amounts" || t === "exceptions") { var it = findItem_(r.item); return !!it && canSee_(me, it.t, it.row, sharing); }
   return false;
 }
 
 // ---------- writing ----------
+// each change is saved or refused on its own, so one refused change never holds up the rest
 function applyOps_(me, ops) {
-  var now = Date.now(), done = [];
-  ops.forEach(function (op) {
-    var t = op.table; if (!SCHEMA[t] || t === "meta") throw new Error("Unknown table " + t);
-    var tab = readTable_(t), sh = tab.sheet || ensureTab_(ss_(), t);
-    var id = op.id || (op.row && op.row.id); if (!id) throw new Error("Missing id");
-    var existing = tab.rows.filter(function (r) { return r.id === id; })[0];
-    var row = existing ? strip_(existing) : {};
-    if (op.op === "delete") { if (!existing) return; row.deleted = true; }
-    else { var src = op.row || op.fields || {}; for (var k in src) if (k !== "updated" && k !== "by") row[k] = src[k]; row.id = id; }
-    var who = owner_(t, row);
-    if (who !== null && who.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")");
-    if (existing) { var ow = owner_(t, existing); if (ow !== null && ow.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")"); }
-    row.updated = now; row.by = me;
-    var head = tab.head.length ? tab.head : SCHEMA[t].concat(COMMON);
-    Object.keys(row).forEach(function (k) { if (head.indexOf(k) < 0 && (SCHEMA[t].indexOf(k) >= 0 || COMMON.indexOf(k) >= 0)) { sh.getRange(1, head.length + 1).setValue(k); head.push(k); } });
-    var line = head.map(function (h) { var v = row[h]; return v === undefined || v === null ? "" : v; });
-    if (existing) sh.getRange(existing._row, 1, 1, line.length).setValues([line]);
-    else sh.appendRow(line);
-    CACHE_[t] = null;
-    done.push({table: t, id: id});
+  var now = Date.now(), applied = [], rejected = [];
+  ops.forEach(function (op, i) {
+    var t = op && op.table, id = op && (op.id || (op.row && op.row.id));
+    try { applyOne_(me, op || {}, now); applied.push({table: t, id: id}); }
+    catch (e) { rejected.push({i: i, table: t || "", id: id || "", error: String(e && e.message || e)}); }
   });
-  return done;
+  return {applied: applied, rejected: rejected};
+}
+// text that a sheet would read as a formula is stored as plain text
+function cell_(v) {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "string" && /^[=+\-@]/.test(v) && !/^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(v)) return "'" + v;
+  return v;
+}
+function applyOne_(me, op, now) {
+  var t = op.table;
+  if (!SCHEMA[t]) throw new Error("Unknown table " + t);
+  if (SERVER_ONLY[t]) throw new Error("The sheet fills in " + t + " itself");
+  var id = op.id || (op.row && op.row.id); if (!id) throw new Error("Missing id");
+  var tab = readTable_(t), sh = tab.sheet || ensureTab_(ss_(), t);
+  var existing = byId_(t, id);
+  var row = existing ? strip_(existing) : {};
+  if (op.op === "delete") { if (!existing) return; row.deleted = true; }
+  else { var src = op.row || op.fields || {}; for (var k in src) if (k !== "updated" && k !== "by" && k !== "_row") row[k] = src[k]; row.id = id; }
+  // people are set up in the sheet; you can change your own name or colour, never who your partner is
+  if (t === "people") {
+    if (!existing) throw new Error("People are added in the sheet");
+    if (op.op === "delete") throw new Error("You can't delete a person");
+    if (String(row.partner || "") !== String(existing.partner || "")) throw new Error("Partners are set in the sheet");
+  }
+  var who = owner_(t, row);
+  if (who !== null && who.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")");
+  if (existing) { var ow = owner_(t, existing); if (ow !== null && ow.indexOf(me) < 0) throw new Error("You can't change that (" + t + ")"); }
+  row.updated = now; row.by = me;
+  var head = tab.head.length ? tab.head : SCHEMA[t].concat(COMMON);
+  Object.keys(row).forEach(function (k) { if (head.indexOf(k) < 0 && (SCHEMA[t].indexOf(k) >= 0 || COMMON.indexOf(k) >= 0)) { sh.getRange(1, head.length + 1).setValue(k); head.push(k); } });
+  tab.head = head;
+  var line = head.map(function (h) { return cell_(row[h]); });
+  // keep the copy of the tab in step, rather than reading the whole tab again after every change
+  if (existing) {
+    sh.getRange(existing._row, 1, 1, line.length).setValues([line]);
+    Object.keys(row).forEach(function (k) { existing[k] = row[k]; });
+  } else {
+    sh.appendRow(line);
+    var added = {_row: sh.getLastRow()}; Object.keys(row).forEach(function (k) { added[k] = row[k]; });
+    tab.rows.push(added); if (tab.idx) tab.idx[id] = added;
+  }
 }
 
 // ---------- sync ----------
-function sync_(me, since, full) {
-  var at = Date.now(), tables = allTables_(), sharingOf = function (p) { var s = {}; tables.settings.forEach(function (r) { if (r.person === p && /^share\./.test(r.key)) s[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); }); return s; };
-  var partner = (tables.people.filter(function (p) { return p.id === me; })[0] || {}).partner || "";
-  var sharing = sharingOf(partner), rows = {}, count = 0;
+// a copy of every tab, and the time it was taken (before reading, so nothing written after it is missed)
+function snapshot_() { var at = Date.now(); return {at: at, tables: allTables_()}; }
+// tables where one row can stop being visible on its own (a split taken off, a budget moved off a LISA)
+var HIDE_ROWS_ = {transactions: true, bills: true, budgets: true, income: true, moves: true, amounts: true, exceptions: true};
+function sync_(me, since, full, snap) {
+  snap = snap || snapshot_();
+  var at = snap.at, tables = snap.tables, recent = function (r) { return (+r.updated || 0) > +since - 5000; };
+  var sharingOf = function (p) { var s = {}; tables.settings.forEach(function (r) { if (r.person === p && /^share\./.test(r.key)) s[r.key.slice(6)] = /^(true|yes|on|1)$/i.test(String(r.value)); }); return s; };
+  var personRow = function (id) { return tables.people.filter(function (p) { return p.id === id; })[0] || null; };
+  // your partner is whoever your row names, as long as their row names you back (and it isn't you)
+  var partner = (personRow(me) || {}).partner || "", pr = personRow(partner);
+  if (!partner || partner === me || !pr || pr.partner !== me) partner = "";
+  var sharing = partner ? sharingOf(partner) : {};
+  full = full || !since;
+  // what your partner shares, who is whose partner, or what kind an account is changed: send everything again,
+  // so rows that just became visible arrive and rows that just became private go
+  if (!full && (tables.settings.some(function (r) { return r.person === partner && /^share\./.test(r.key) && recent(r); }) || tables.people.some(recent) || tables.accounts.some(recent))) full = true;
+  var rows = {}, count = 0, needStub = {};
   Object.keys(tables).forEach(function (t) {
-    rows[t] = tables[t].filter(function (r) { return (full || !since || (+r.updated || 0) > +since - 5000 || t === "meta") && canSee_(me, t, r, sharing); });
-    count += rows[t].length;
+    rows[t] = [];
+    tables[t].forEach(function (r) {
+      if (!(full || recent(r) || t === "meta")) return;
+      if (canSee_(me, t, r, sharing)) {
+        rows[t].push(r);
+        // your partner's split payment names their budget, so the app can match it to yours ("Food")
+        if (t === "transactions" && r.person !== me && r.budget) needStub[r.budget] = true;
+      } else if (!full && HIDE_ROWS_[t]) rows[t].push({id: r.id, deleted: true});   // it may have been visible before
+    });
   });
+  // the partner's budgets you can't see, cut down to what matching needs
+  var sent = {}; rows.budgets.forEach(function (r) { if (!r.deleted) sent[r.id] = true; });
+  rows.budgets = rows.budgets.filter(function (r) { return !(r.deleted && needStub[r.id]); });
+  tables.budgets.forEach(function (b) { if (needStub[b.id] && !sent[b.id]) rows.budgets.push({id: b.id, person: b.person, name: b.name, hidden: true, updated: b.updated, deleted: b.deleted}); });
+  Object.keys(rows).forEach(function (t) { count += rows[t].length; });
   var today = Utilities.formatDate(new Date(), tz_(), "yyyy-MM-dd"), summary = null;
-  if (partner) { try { summary = Budgie.summary(Budgie.load(tables, today), partner, today); } catch (x) { summary = {error: String(x)}; } }
-  return {ok: true, person: me, now: at, today: today, full: full || !since, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
+  if (partner) summary = partnerSummary_(tables, partner, today);
+  return {ok: true, person: me, now: at, today: today, full: full, rows: rows, count: count, partnerSummary: summary, engine: Budgie.VERSION, schema: SCHEMA_VERSION};
+}
+// worked out once per change and day, then kept for a few hours (each phone asks every minute)
+function partnerSummary_(tables, partner, today) {
+  var latest = 0; Object.keys(tables).forEach(function (t) { tables[t].forEach(function (r) { var u = +r.updated || 0; if (u > latest) latest = u; }); });
+  var key = "sum:" + Budgie.VERSION + ":" + partner + ":" + today + ":" + latest, cache = null;
+  try { cache = typeof CacheService !== "undefined" ? CacheService.getScriptCache() : null; var hit = cache && cache.get(key); if (hit) return JSON.parse(hit); } catch (x) { cache = null; }
+  var summary;
+  try { summary = Budgie.summary(Budgie.load(tables, today), partner, today); } catch (x) { return {error: String(x)}; }
+  try { if (cache) cache.put(key, JSON.stringify(summary), 21600); } catch (x) {}
+  return summary;
+}
+
+// edits typed straight into the sheet get a new "updated" time, so phones pick them up on their next sync
+// (a simple trigger: Apps Script runs it by itself, nothing to install)
+function onEdit(e) {
+  try {
+    if (!e || !e.range) return;
+    var sh = e.range.getSheet(), t = sh.getName(); if (!SCHEMA[t] || t === "meta") return;
+    var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String), uc = head.indexOf("updated") + 1, bc = head.indexOf("by") + 1;
+    if (!uc) return;
+    var r0 = Math.max(2, e.range.getRow()), r1 = e.range.getLastRow(); if (r1 < r0) return;
+    if (e.range.getColumn() >= uc && e.range.getLastColumn() <= uc) return;   // only the updated column itself
+    var now = Date.now(), times = [], who = [];
+    for (var r = r0; r <= r1; r++) { times.push([now]); who.push(["sheet"]); }
+    sh.getRange(r0, uc, times.length, 1).setValues(times);
+    if (bc && !(e.range.getColumn() <= bc && e.range.getLastColumn() >= bc)) sh.getRange(r0, bc, who.length, 1).setValues(who);
+  } catch (x) {}
 }
 
 // ---------- the official budget tabs ("Ethan budget", "Sophie budget") ----------
@@ -249,8 +343,9 @@ function refreshBudgetTabs() {
     sh.getRange(1, 1, out.length, out[0].length).protect().setWarningOnly(true);
   });
 }
+// replaces only its own trigger, so the daily fund prices trigger (Prices.gs) keeps running
 function installTriggers() {
-  ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.getProjectTriggers().forEach(function (t) { if (t.getHandlerFunction() === "refreshBudgetTabs") ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger("refreshBudgetTabs").timeBased().everyHours(1).create();
   Logger.log("The budget tabs now refresh every hour, and a minute after any change from the app.");
 }

@@ -6,7 +6,7 @@
   else root.Budgie = factory();
 })(this, function () {
   "use strict";
-  var VERSION = "1.2.0";
+  var VERSION = "1.3.0";
 
   // ---------- dates ----------
   function D(s) { var p = String(s).split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
@@ -87,7 +87,7 @@
     var out = [], unit = String(it.unit || "month").toLowerCase(), every = Math.max(1, +it.every || 1);
     var start = it.start || from, end = it.end || "";
     var stop = end ? minS(addDays(end, 1), to) : to;
-    var push = function (d) { if (d && d >= from && d < stop && d >= start) out.push(d); };
+    var push = function (d) { if (d && d >= from && d < stop && d >= start && out.indexOf(d) < 0) out.push(d); };
     if (unit === "once") push(start);
     else if (unit === "dates") String(it.dates || "").split(/[,;\n]+/).map(parseDate).filter(Boolean).forEach(push);
     else if (unit === "day" || unit === "days") { var k0 = Math.max(0, Math.floor(diff(start, from) / every)); for (var d = addDays(start, k0 * every); d < stop; d = addDays(d, every)) push(d); }
@@ -103,7 +103,8 @@
       idx = idx - (idx % every);
       for (; idx <= limit; idx += every) { var yy = y0 + Math.floor((m0 + idx) / 12), mo = (m0 + idx) % 12; push(dayInMonth(yy, mo, it.on, +start.slice(8, 10))); }
     }
-    return out.map(function (d) { return shiftDay(d, it.shift); }).filter(function (d, i, a) { return a.indexOf(d) === i; }).sort();
+    // two dates that shift onto the same working day are still two payments
+    return out.sort().map(function (d) { return shiftDay(d, it.shift); }).sort();
   }
   // the amount an item has on a date, using dated changes from the amounts table
   function amountAt(db, it, date) {
@@ -114,9 +115,10 @@
   // occurrences with exceptions applied: [{key, item, orig, date, amount, changed}]
   function occurrences(db, it, from, to) { return it.id ? memo(db, "occ|" + it.id + "|" + from + "|" + to, function () { return occ0(db, it, from, to); }) : occ0(db, it, from, to); }
   function occ0(db, it, from, to) {
-    var raw = scheduleDates(it, addDays(from, -45), addDays(to, 45)), ex = db.byItem.exceptions[it.id] || [], out = [];
+    var raw = scheduleDates(it, addDays(from, -45), addDays(to, 45)), ex = db.byItem.exceptions[it.id] || [], out = [], seen = {};
     raw.forEach(function (orig) {
-      var o = {key: it.id + "@" + orig, item: it, orig: orig, date: orig, amount: amountAt(db, it, orig), changed: false, skipped: false};
+      var n = seen[orig] = (seen[orig] || 0) + 1;
+      var o = {key: it.id + "@" + orig + (n > 1 ? "#" + n : ""), item: it, orig: orig, date: orig, amount: amountAt(db, it, orig), changed: false, skipped: false};
       ex.forEach(function (x) {
         if (x.date !== orig) return;
         var a = String(x.action || "").toLowerCase();
@@ -156,7 +158,7 @@
     });
     return r;
   }
-  var TABLES = ["people", "accounts", "income", "bills", "budgets", "splits", "transfers", "transactions", "moves", "settlements", "loans", "goals", "valuations", "amounts", "exceptions", "settings", "gifts", "meta"];
+  var TABLES = ["people", "accounts", "income", "bills", "budgets", "splits", "transfers", "transactions", "moves", "settlements", "loans", "goals", "valuations", "amounts", "exceptions", "settings", "gifts", "prices", "meta"];
   // today (optional): money already in pots only counts for periods that have started
   function load(tables, today) {
     var db = {byItem: {amounts: {}, exceptions: {}}, byId: {}, _c: {}, today: today || ""};
@@ -169,6 +171,12 @@
     db.settings.forEach(function (s) { var p = s.person || "all"; (db.set[p] = db.set[p] || {})[s.key] = s.value; });
     db.moveKeys = {};
     db.moves.forEach(function (m) { if (m.key) db.moveKeys[m.key] = (db.moveKeys[m.key] || 0) + (+m.amount || 0) + 1e-9; });
+    // a LISA payment copied from the provider's statement that is the same money as a move ticked in Budgie
+    // (same account and amount, within 5 days) only counts once
+    db.moves.forEach(function (m) {
+      if (!/^lisa:in/.test(m.key || "") || !m.to) return;
+      m.dup = db.moves.some(function (o) { return o !== m && !/^lisa:/.test(o.key || "") && o.to === m.to && Math.abs((+o.amount || 0) - (+m.amount || 0)) < 0.005 && Math.abs(diff(o.date, m.date)) <= 5; });
+    });
     db.settleKeys = {};
     db.settlements.forEach(function (s) { if (s.key) db.settleKeys[s.key] = true; });
     return db;
@@ -181,6 +189,8 @@
   function fallbackOf(db, p) { var a = accountsOf(db, p).filter(function (x) { return x.fallback; })[0]; return a ? a.id : ""; }
   function accName(db, id) { var a = db.byId[id]; return a ? a.name : (id || ""); }
   function startOf(db, p) { return setting(db, p, "start", "2026-10-26"); }
+  // the day a ticked move should be dated: payday moves belong to their payday, everything else to the day you tick it
+  function moveDate(key, today) { var m = String(key || "").match(/^pay:(\d{4}-\d{2}-\d{2}):/); return m && m[1] <= today ? m[1] : today; }
   var round = function (n) { return Math.round((+n || 0) * 100) / 100; };
 
   // ---------- splits ----------
@@ -207,31 +217,59 @@
   function payDates(db, p, from, to) {
     var out = [];
     db.income.filter(function (i) { return i.person === p && i.isPay; }).forEach(function (i) { occurrences(db, i, from, to).forEach(function (o) { out.push(o.date); }); });
-    return out.filter(function (d, i, a) { return a.indexOf(d) === i; }).sort();
+    return uniqSorted(out);
   }
+  function uniqSorted(a) { var s = a.slice().sort(), out = []; for (var i = 0; i < s.length; i++) if (!i || s[i] !== s[i - 1]) out.push(s[i]); return out; }
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   function periodName(start, next) { var mid = addDays(start, Math.min(14, Math.floor(diff(start, next) / 2))); return MONTHS[+mid.slice(5, 7) - 1] + " " + mid.slice(0, 4); }
   // pay periods covering [from, to): [{start, next, name, pay}]
   function periods(db, p, from, to) { return memo(db, "per|" + p + "|" + from + "|" + to, function () { return per0(db, p, from, to); }); }
   function per0(db, p, from, to) {
     var st = startOf(db, p), pays = payDates(db, p, addDays(from, -70), addDays(to, 70)), out = [];
-    var before = pays.filter(function (d) { return d <= from; }), first = before.length ? before[before.length - 1] : "";
-    var list = (first ? [first] : []).concat(pays.filter(function (d) { return d > from; }));
-    if (!first) {
-      var s0 = st <= from ? st : ymd(+from.slice(0, 4), +from.slice(5, 7) - 1, 1);
-      list.unshift(s0);
+    // no pay at all (yet): monthly periods on the day tracking started
+    var bounds = pays;
+    if (!bounds.length && !db.income.some(function (i) { return i.person === p && i.isPay; })) {
+      bounds = []; var sd = +st.slice(8, 10), y1 = +from.slice(0, 4), m1 = +from.slice(5, 7) - 3, n = (+to.slice(0, 4) - y1) * 12 + (+to.slice(5, 7) - 1) - m1 + 3;
+      for (var k = 0; k <= n; k++) { var dd = dayInMonth(y1 + Math.floor((m1 + k) / 12), ((m1 + k) % 12 + 12) % 12, sd); if (bounds.indexOf(dd) < 0) bounds.push(dd); }
+      bounds.sort();
     }
-    for (var i = 0; i < list.length - 1; i++) { if (list[i] >= to) break; out.push({start: list[i], next: list[i + 1], name: periodName(list[i], list[i + 1]), pay: pays.indexOf(list[i]) >= 0, opening: list[i] <= st && st < list[i + 1]}); }
+    var before = bounds.filter(function (d) { return d <= from; }), first = before.length ? before[before.length - 1] : "";
+    var list = (first ? [first] : []).concat(bounds.filter(function (d) { return d > from; }));
+    if (!first) {
+      if (st <= from) list.unshift(st);
+      else {
+        // before tracking starts: a period that ends where tracking starts, so it never overlaps the first tracked one
+        if (!list.length || st < list[0]) list.unshift(st);
+        list.unshift(ymd(+from.slice(0, 4), +from.slice(5, 7) - 1, 1));
+      }
+    }
+    list = uniqSorted(list);
+    // the opening part-period: tracking started inside it, or on its first day when that isn't a payday
+    var isPay = {}; pays.forEach(function (d) { isPay[d] = true; });
+    var isOpening = function (s, nx) { return (s < st && st < nx) || (s === st && !isPay[st]); };
+    for (var i = 0; i < list.length - 1; i++) { if (list[i] >= to) break; if (list[i + 1] <= from) continue; out.push({start: list[i], next: list[i + 1], name: periodName(list[i], list[i + 1]), pay: !!isPay[list[i]], opening: isOpening(list[i], list[i + 1])}); }
     if (!out.length) { var n = list[list.length - 1] || from; out.push({start: n, next: addDays(n, 30), name: periodName(n, addDays(n, 30)), pay: pays.indexOf(n) >= 0}); }
     return out;
+  }
+  // every tracked pay period that starts before a date, from one list worked out once
+  function trackedBefore(db, p, date) {
+    var st = startOf(db, p);
+    var all = memo(db, "tper|" + p, function () { return periods(db, p, st, addDays(maxS(db.today || st, st), 1100)); });
+    var last = all[all.length - 1];
+    var list = last && date <= last.next ? all : periods(db, p, st, date);
+    return list.filter(function (pk) { return pk.start < date && pk.next > st; });
   }
   function periodAt(db, p, date) { var ps = periods(db, p, date, addDays(date, 1)); return ps[ps.length - 1]; }
   function prevPeriod(db, p, per) { return periodAt(db, p, addDays(per.start, -1)); }
   function nextPeriod(db, p, per) { return periodAt(db, p, per.next); }
 
   // ---------- spending ----------
+  // a budget's start, end and dated amounts are matched against the middle of the pay period, so a period that
+  // begins a few days early (pay moved for a weekend or Christmas) still gets the right budgets
+  function midOf(per) { return addDays(per.start, Math.floor(Math.max(0, diff(per.start, per.next)) / 2)); }
+  function activeIn(b, per) { var mid = midOf(per); return (!b.start || b.start <= mid) && (!b.end || b.end >= mid); }
   function budgetsOf(db, p, per) {
-    return db.budgets.filter(function (b) { return b.person === p && (!b.start || b.start < per.next) && (!b.end || b.end >= per.start); });
+    return db.budgets.filter(function (b) { return b.person === p && activeIn(b, per); });
   }
   function sameBudget(db, b, txn) {
     if (txn.budget === b.id) return true;
@@ -254,7 +292,7 @@
   function budgetAmount(db, b, per) {
     // the first part-period can start from what's really in the pots: settings "opening.<budget id>"
     if (per.opening) { var o = setting(db, b.person, "opening." + b.id, ""); if (o !== "" && !isNaN(+o)) return round(+o); }
-    var a = amountAt(db, b, per.start), st = startOf(db, b.person);
+    var a = amountAt(db, b, midOf(per)), st = startOf(db, b.person);
     // the first part-period, when tracking starts: only the days that are left (a short stub counts against a typical month)
     if (per.start <= st && st < per.next) a = a * diff(st, per.next) / Math.max(28, diff(per.start, per.next));
     return round(a);
@@ -274,18 +312,24 @@
       if (!isSpend(db, b)) return;
       var amt = b.mode === "remainder" ? plan.remainder : budgetAmount(db, b, per);
       // only budgets marked carry keep what's unspent (up to one month's worth); "whatever is left" never piles up
-      var carryIn = b.carry === true && b.mode !== "oneoff" && b.mode !== "remainder" ? ((prev[b.id] || {}).carryOut || 0) : 0;
+      var carries = b.carry === true && b.mode !== "oneoff" && b.mode !== "remainder";
+      var carryIn = carries ? ((prev[b.id] || {}).carryOut || 0) : 0;
       var spent = spentOn(db, p, b, maxS(per.start, st), per.next);
       var avail = amt + carryIn, over = Math.max(0, spent - avail);
-      res[b.id] = {budget: b, period: per, amount: amt, carryIn: round(carryIn), spent: spent, avail: round(avail), left: round(avail - spent), over: round(over), carryOut: round(Math.min(Math.max(0, avail - spent), Math.max(amt, budgetAmount(db, b, {start: per.next, next: addDays(per.next, 30)})))), current: true};
+      // what's unspent carries on (up to one month's worth) only for budgets marked carry
+      var carryOut = carries ? Math.min(Math.max(0, avail - spent), Math.max(amt, budgetAmount(db, b, {start: per.next, next: addDays(per.next, 30)}))) : 0;
+      res[b.id] = {budget: b, period: per, amount: amt, carryIn: round(carryIn), spent: spent, avail: round(avail), left: round(avail - spent), over: round(over), carryOut: round(carryOut), current: true};
     });
     return res;
   }
-  function overIn(db, p, per) {
-    var st = startOf(db, p); if (per.next <= st) return 0;
-    var s = budgetState(db, p, per), t = 0;
-    Object.keys(s).forEach(function (k) { if (s[k].period.start === per.start) t += s[k].over; });
-    return round(t);
+  // what was in each account at the start of the day tracking started (a balance checked that day, less what
+  // happened that day, so payday on the first day isn't counted twice)
+  function startBalances(db, p) {
+    return memo(db, "sb|" + p, function () {
+      var st = startOf(db, p), res = Object.assign({}, balances(db, st));
+      flows(db, addDays(st, -1), st).forEach(function (f) { if (res[f.account] !== undefined) res[f.account] = round(res[f.account] - f.amount); });
+      return res;
+    });
   }
 
   // ---------- the plan for one pay period ----------
@@ -318,7 +362,7 @@
       });
     });
     if (per.opening) {
-      var ob = balances(db, addDays(st, -1)), opening = 0;
+      var ob = startBalances(db, p), opening = 0;
       accountsOf(db, p).forEach(function (a) { if (a.kind === "main" || (a.kind === "pot" && !a.fallback)) opening += ob[a.id] || 0; });
       if (opening) lines.push({kind: "in", name: "In your account and " + (person(db, p).potWord || "pot") + "s when you started", amount: round(opening), account: main, date: st, id: "opening"});
     }
@@ -330,29 +374,49 @@
       lines.push({kind: b.mode === "saving" ? "save" : "spend", name: b.name, amount: amt, account: b.account || main, id: b.id, mode: b.mode || "daily"});
     });
     if (!noTopup) {
-      var fb = fallbackOf(db, p), top = fb ? overIn(db, p, prevPeriod(db, p, per)) : 0;
+      // puts back what the fallback pot really paid out last period: covers for going over, and a ticked payday cover
+      var fb = fallbackOf(db, p), pvT = fb ? prevPeriod(db, p, per) : null, top = 0;
+      if (pvT && pvT.start < from && pvT.next > st) {
+        reimbursements(db, p, pvT, addDays(pvT.next, -1)).forEach(function (g) { if (g.kind === "over" && g.from === fb) top += g.amount; });
+        if (pvT.pay && !pvT.opening) top += db.moveKeys["pay:" + pvT.start + ":cover"] || 0;
+      }
+      top = round(top);
       if (top > 0.004) lines.push({kind: "topup", name: "Top up " + accName(db, fb), amount: top, account: fb, id: "topup"});
     }
     // money already sitting in a pot when the period starts (bills came in cheaper, a pot topped up early) counts
     // towards that pot's needs; a pot that ended short gets caught up; what's left in the main account carries
     // into the new month. Worked out once the period has started, and estimated for the next payday.
     var pv0 = db.today && from > addDays(db.today, 1) ? prevPeriod(db, p, per) : null, upcoming = !!(pv0 && pv0.start <= db.today);
-    if (!per.opening && addDays(from, -1) >= st && (!db.today || from <= addDays(db.today, 1) || upcoming)) {
-      var dayBefore = addDays(from, -1), bal = Object.assign({}, balances(db, dayBefore)), pv = prevPeriod(db, p, per), bst = pv && pv.start < from ? budgetState(db, p, pv) : {};
-      // before payday, budgets this month can still be spent, so keep what's left of them as well as what carries over
-      var keepOf = function (accId) { var k = 0; Object.keys(bst).forEach(function (id) { var s = bst[id]; if ((s.budget.account || main) !== accId || s.budget.mode === "remainder" || s.budget.mode === "saving") return; k += upcoming ? Math.max(s.carryOut || 0, (s.avail || 0) - (s.spent || 0), 0) : (s.carryOut || 0); }); return k; };
-      // moves still on the To do count as done, so a forgotten tick doesn't ask for the money twice
-      var pendMove = function (from2, to2, amt) { if (bal[from2] !== undefined) bal[from2] = round(bal[from2] - amt); if (bal[to2] !== undefined) bal[to2] = round(bal[to2] + amt); };
-      periods(db, p, st, from).forEach(function (pk) {
-        if (pk.start >= from) return;
-        if (pk.pay && !pk.opening) payday(db, p, pk).moves.forEach(function (m) { if (!db.moveKeys["pay:" + pk.start + ":" + m.to]) pendMove(m.from, m.to, m.amount); });
-        reimbursements(db, p, pk, minS(dayBefore, addDays(pk.next, -1))).forEach(function (g) { var left = round(g.amount - (db.moveKeys[g.key] || 0)); if (left > 0.004) pendMove(g.from, g.to, left); });
+    // money saved into a pot for something later (a sinking fund) is kept for that pot's bills, carried from period to period
+    var pvR = per.opening ? null : prevPeriod(db, p, per), resIn = pvR && pvR.start < from && pvR.next > st ? (planFor(db, p, pvR).reserveOut || {}) : {}, reserveOut = {};
+    var potOk = function (id) { var a = db.byId[id]; return a && a.owner === p && a.kind === "pot" && !a.fallback; };
+    Object.keys(resIn).forEach(function (id) { reserveOut[id] = resIn[id]; });
+    if (!per.opening && from >= st && (!db.today || from <= addDays(db.today, 1) || upcoming)) {
+      var first = from === st, dayBefore = addDays(from, -1), bal = Object.assign({}, first ? startBalances(db, p) : balances(db, dayBefore)), pv = prevPeriod(db, p, per), bst = !first && pv && pv.start < from ? budgetState(db, p, pv) : {};
+      // what each budget keeps in its pot: what carries over, and before payday whatever is still left to spend
+      // (including "whatever is left" budgets, which can still be spent until payday)
+      var keepOf = function (accId) { var k = 0; Object.keys(bst).forEach(function (id) { var s = bst[id]; if ((s.budget.account || main) !== accId || s.budget.mode === "saving") return; k += upcoming ? Math.max(s.carryOut || 0, (s.avail || 0) - (s.spent || 0), 0) : (s.carryOut || 0); }); return k; };
+      // moves still on the To do count as done, so a forgotten tick doesn't ask for the money twice;
+      // but a balance checked on or after the move already includes it, so that side is left alone
+      var vd = {}; db.valuations.forEach(function (v) { if (v.date <= dayBefore && v.date > (vd[v.account] || "")) vd[v.account] = v.date; });
+      var pendMove = function (from2, to2, amt, when) {
+        if (bal[from2] !== undefined && !(vd[from2] >= when)) bal[from2] = round(bal[from2] - amt);
+        if (bal[to2] !== undefined && !(vd[to2] >= when)) bal[to2] = round(bal[to2] + amt);
+      };
+      if (!first) trackedBefore(db, p, from).forEach(function (pk) {
+        if (pk.start >= from || pk.next <= st) return;
+        if (pk.pay && !pk.opening) payday(db, p, pk).moves.forEach(function (m) { if (!db.moveKeys["pay:" + pk.start + ":" + m.to]) pendMove(m.from, m.to, m.amount, pk.start); });
+        reimbursements(db, p, pk, minS(dayBefore, addDays(pk.next, -1))).forEach(function (g) { var left = round(g.amount - (db.moveKeys[g.key] || 0)); if (left > 0.004) pendMove(g.from, g.to, left, g.date || pk.start); });
       });
       accountsOf(db, p).forEach(function (a) {
         if (a.kind !== "pot" || a.fallback) return;
-        var needs = 0; lines.forEach(function (l) { if (l.kind !== "in" && l.account === a.id) needs += l.amount; });
-        var spare = round((bal[a.id] || 0) - keepOf(a.id));
-        if (spare > 0.004 && needs > 0.004) lines.push({kind: "in", name: "Already in " + a.name, amount: round(Math.min(spare, needs)), account: a.id, id: "already", already: true, estimate: upcoming});
+        var needs = 0, billNeeds = 0; lines.forEach(function (l) { if (l.kind !== "in" && l.account === a.id) { needs += l.amount; if (l.kind === "bill") billNeeds += l.amount; } });
+        var spare = round((bal[a.id] || 0) - keepOf(a.id)), R = round(Math.min(resIn[a.id] || 0, Math.max(0, spare))), free = round(spare - R);
+        // spare money counts towards anything the pot needs; the saved-up money only towards its bills
+        var useFree = free > 0.004 ? Math.min(free, needs) : 0, billsLeft = Math.max(0, billNeeds - Math.max(0, useFree - (needs - billNeeds))), useR = Math.min(R, billsLeft);
+        reserveOut[a.id] = round(R - useR);
+        var got = round(useFree + useR);
+        if (got > 0.004) lines.push({kind: "in", name: "Already in " + a.name, amount: got, account: a.id, id: "already", already: true, estimate: upcoming});
         else if (spare < -0.004) lines.push({kind: "bill", name: "Catch up " + a.name, amount: round(-spare), account: a.id, id: "catchup", catchup: true, estimate: upcoming});
       });
       if (bal[main] !== undefined) {
@@ -361,11 +425,13 @@
         else if (left0 < -0.004) lines.push({kind: "bill", name: "Catch up " + accName(db, main), amount: round(-left0), account: main, id: "catchup", catchup: true, estimate: upcoming});
       }
     }
+    lines.forEach(function (l) { if (l.kind === "save" && potOk(l.account)) reserveOut[l.account] = round((reserveOut[l.account] || 0) + l.amount); });
+    Object.keys(reserveOut).forEach(function (id) { if (!potOk(id) || !(reserveOut[id] > 0.004)) delete reserveOut[id]; });
     var tin = 0, tout = 0;
     lines.forEach(function (l) { if (l.kind === "in") tin += l.amount; else tout += l.amount; });
     var left = round(tin - tout);
     if (per.opening && remainder && savingKind(db, remainder.account)) left = 0;
-    var res = {period: per, lines: lines, totalIn: round(tin), totalOut: round(tout), remainder: Math.max(0, round(left)), shortfall: left < 0 ? round(-left) : 0, remainderBudget: remainder, opening: !!per.opening};
+    var res = {period: per, lines: lines, totalIn: round(tin), totalOut: round(tout), remainder: Math.max(0, round(left)), shortfall: left < 0 ? round(-left) : 0, remainderBudget: remainder, opening: !!per.opening, reserveOut: reserveOut};
     if (remainder) lines.push({kind: remainder.account && (db.byId[remainder.account] || {}).kind !== "main" && /saving|isa|lisa|pension/.test((db.byId[remainder.account] || {}).kind) ? "save" : "spend", name: remainder.name, amount: res.remainder, account: remainder.account || main, id: remainder.id, mode: "remainder", remainder: true});
     var sum = function (k) { var t = 0; lines.forEach(function (l) { if (l.kind === k) t += l.amount; }); return round(t); };
     res.totals = {in: sum("in"), bills: sum("bill"), spend: sum("spend"), save: round(sum("save") + sum("topup"))};
@@ -393,14 +459,15 @@
   // every flow in or out of an account in (after, upTo]: {date, account, amount (+ in / - out), what}
   function flows(db, after, upTo) { return memo(db, "fl|" + after + "|" + upTo, function () { return fl0(db, after, upTo); }); }
   function fl0(db, after, upTo) {
-    var out = [], push = function (date, acc, amt, what, src) { if (acc && date > after && date <= upTo && amt) out.push({date: date, account: acc, amount: round(amt), what: what, src: src}); };
+    // upd: when a logged row was saved, so a balance checked earlier the same day doesn't swallow it
+    var out = [], push = function (date, acc, amt, what, src, upd) { if (acc && date > after && date <= upTo && amt) out.push({date: date, account: acc, amount: round(amt), what: what, src: src, upd: +upd || 0}); };
     var from = addDays(after, 1), to = addDays(upTo, 1);
     db.income.forEach(function (i) { occurrences(db, i, from, to).forEach(function (o) { if (o.date >= startOf(db, i.person)) push(o.date, i.account || mainOf(db, i.person), o.amount, i.name, o.key); }); });
     db.bills.forEach(function (b) { occurrences(db, b, from, to).forEach(function (o) { if (o.date >= startOf(db, b.person)) push(o.date, b.account || mainOf(db, b.person), -o.amount, b.name, o.key); }); });
     db.transfers.forEach(function (t) { occurrences(db, t, from, to).forEach(function (o) { if (o.date >= startOf(db, t.from)) { push(o.date, t.fromAccount || mainOf(db, t.from), -o.amount, t.name, o.key); push(o.date, t.toAccount || mainOf(db, t.to), o.amount, t.name, o.key); } }); });
-    db.transactions.forEach(function (x) { push(x.date, x.account || mainOf(db, x.person), -(+x.amount || 0), x.note || x.budget, x.id); });
-    db.moves.forEach(function (m) { if (m.from) push(m.date, m.from, -(+m.amount || 0), "move", m.id); if (m.to) push(m.date, m.to, +m.amount || 0, "move", m.id); });
-    db.settlements.forEach(function (s) { push(s.date, s.fromAccount || mainOf(db, s.from), -(+s.amount || 0), s.note || "payment", s.id); push(s.date, s.toAccount || mainOf(db, s.to), +s.amount || 0, s.note || "payment", s.id); });
+    db.transactions.forEach(function (x) { push(x.date, x.account || mainOf(db, x.person), -(+x.amount || 0), x.note || x.budget, x.id, x.updated); });
+    db.moves.forEach(function (m) { if (m.dup) return; if (m.from) push(m.date, m.from, -(+m.amount || 0), "move", m.id, m.updated); if (m.to) push(m.date, m.to, +m.amount || 0, "move", m.id, m.updated); });
+    db.settlements.forEach(function (s) { push(s.date, s.fromAccount || mainOf(db, s.from), -(+s.amount || 0), s.note || "payment", s.id, s.updated); push(s.date, s.toAccount || mainOf(db, s.to), +s.amount || 0, s.note || "payment", s.id, s.updated); });
     db.loans.forEach(function (l) { if (l.account) push(l.date, l.account, -(+l.amount || 0), l.name, l.id); });
     return out;
   }
@@ -421,13 +488,19 @@
   // (flows on a valuation's own date are already in it)
   function balances(db, date) { return memo(db, "bal|" + date, function () { return bal0(db, date); }); }
   function bal0(db, date) {
-    var res = {}, base = {}, vdate = {};
+    var res = {}, base = {}, vdate = {}, vupd = {};
     db.accounts.forEach(function (a) { res[a.id] = 0; base[a.id] = addDays(startOf(db, a.owner), -1); });
-    db.valuations.forEach(function (v) { if (v.date <= date && res[v.account] !== undefined && v.date >= (vdate[v.account] || "")) { vdate[v.account] = v.date; res[v.account] = +v.amount || 0; base[v.account] = v.date; } });
+    db.valuations.forEach(function (v) {
+      if (v.date > date || res[v.account] === undefined) return;
+      var vd = vdate[v.account] || "";
+      if (v.date > vd || (v.date === vd && (+v.updated || 0) >= (vupd[v.account] || 0))) { vdate[v.account] = v.date; vupd[v.account] = +v.updated || 0; res[v.account] = +v.amount || 0; base[v.account] = v.date; }
+    });
     var af = allFlows(db), list = af.list;
     if (date > af.to) list = flows(db, addDays(af.from, -1), date);
     var end = date > af.to ? list.length : lowerBound(af.dates, addDays(date, 1));
-    for (var i = 0; i < end; i++) { var f = list[i]; if (res[f.account] !== undefined && f.date > base[f.account] && f.date <= date) res[f.account] = round(res[f.account] + f.amount); }
+    // flows on a check's own date are already in it, unless they were logged after the check
+    var counts = function (f) { var b = base[f.account]; return f.date > b || (f.date === b && f.upd && vupd[f.account] && f.upd > vupd[f.account]); };
+    for (var i = 0; i < end; i++) { var f = list[i]; if (res[f.account] !== undefined && f.date <= date && counts(f)) res[f.account] = round(res[f.account] + f.amount); }
     return res;
   }
 
@@ -446,13 +519,23 @@
         var own = function (x) { return (x.account || main) === home; }, left = amt + ((budgetState(db, p, pk)[b.id] || {}).carryIn || 0);
         list.filter(own).forEach(function (x) { left -= myShare(db, p, x); });
         // one combined move per pot and reason, so ten small shops make one To do item
-        var agg = {}, bump = function (key, from, to, a, kind) { if (!(a > 0.004)) return; var g = agg[key] = agg[key] || {key: key, from: from, to: to, amount: 0, kind: kind, name: b.name.toLowerCase()}; g.amount += a; };
-        if (left < 0 && home === main && fb) bump("cover:" + b.id + ":" + pk.start + ":" + main, fb, main, -left, "over");
-        left = Math.max(0, left);
+        var lastDate = list[list.length - 1].date;
+        var agg = {}, bump = function (key, from, to, a, kind, date) { if (!(a > 0.004)) return; var g = agg[key] = agg[key] || {key: key, from: from, to: to, amount: 0, kind: kind, name: b.name.toLowerCase(), date: ""}; g.amount += a; if (date > g.date) g.date = date; };
+        // payments and refunds through each other account, netted (only my share: the other share comes back from my partner)
+        var byPayer = {}, payerDate = {}, payers = [];
         list.filter(function (x) { return !own(x); }).forEach(function (x) {
-          var payer = x.account || main, a = +x.amount || 0, give = Math.min(a, left); left -= give;
-          bump("back:" + b.id + ":" + pk.start + ":" + payer, home, payer, give, "back");
-          if (fb && payer !== fb) bump("cover:" + b.id + ":" + pk.start + ":" + payer, fb, payer, a - give, "over");
+          var payer = x.account || main; if (byPayer[payer] === undefined) { byPayer[payer] = 0; payers.push(payer); }
+          byPayer[payer] += myShare(db, p, x); if (!payerDate[payer] || x.date > payerDate[payer]) payerDate[payer] = x.date;
+        });
+        // a refund that landed somewhere else goes back to the budget's pot
+        payers.forEach(function (payer) { var a = round(byPayer[payer]); if (a < -0.004) { bump("refund:" + b.id + ":" + pk.start + ":" + payer, payer, home, -a, "refund", payerDate[payer]); left += -a; } });
+        if (left < 0 && home === main && fb) bump("cover:" + b.id + ":" + pk.start + ":" + main, fb, main, -left, "over", lastDate);
+        left = Math.max(0, left);
+        payers.forEach(function (payer) {
+          var a = round(byPayer[payer]); if (!(a > 0.004)) return;
+          var give = Math.min(a, left); left -= give;
+          bump("back:" + b.id + ":" + pk.start + ":" + payer, home, payer, give, "back", payerDate[payer]);
+          if (fb && payer !== fb) bump("cover:" + b.id + ":" + pk.start + ":" + payer, fb, payer, a - give, "over", payerDate[payer]);
         });
         Object.keys(agg).forEach(function (k) { agg[k].amount = round(agg[k].amount); out.push(agg[k]); });
       });
@@ -484,6 +567,7 @@
     periods(db, p, st, addDays(today, 1)).forEach(function (pk) {
       reimbursements(db, p, pk, today).forEach(function (g) {
         if (g.kind === "back") plan(g.key, g.from, g.to, g.amount, "", "You paid for " + g.name + " from " + accName(db, g.to) + ".", {partial: true, names: [g.name]});
+        else if (g.kind === "refund") plan(g.key, g.from, g.to, g.amount, "", "A " + g.name + " refund came into " + accName(db, g.from) + ".", {partial: true, refund: true, names: [g.name]});
         else plan(g.key, g.from, g.to, g.amount, "", "You went over your " + g.name + " budget" + (g.to === main ? "" : " paying from " + accName(db, g.to)) + ". Your next pay tops the " + accName(db, g.from) + " back up.", {partial: true, over: true, names: [g.name]});
       });
     });
@@ -492,11 +576,12 @@
     items.forEach(function (it) {
       it.keys = [{key: it.key, amount: it.amount}];
       if (it.type !== "move" || it.payday || !it.names) { grouped.push(it); return; }
-      var g = it.from + ">" + it.to + (it.over ? "!" : "");
+      var g = it.from + ">" + it.to + (it.over ? "!" : it.refund ? "r" : "");
       if (at[g] === undefined) { at[g] = grouped.length; grouped.push(it); return; }
       var x = grouped[at[g]]; x.amount = round(x.amount + it.amount); x.keys.push({key: it.key, amount: it.amount}); x.names = x.names.concat(it.names);
       x.short = it.short || x.short; x.what = "Move " + money(x.amount) + " from " + x.fromName + " to " + x.toName;
       x.why = x.over ? "You went over your " + joinNames(x.names) + " budget" + (x.names.length > 1 ? "s" : "") + (x.to === main ? "" : " paying from " + x.toName) + ". Your next pay tops the " + x.fromName + " back up."
+        : x.refund ? "Refunds for " + joinNames(x.names) + " came into " + x.fromName + "."
         : "You paid for " + joinNames(x.names) + " from " + x.toName + ".";
     });
     items = grouped;
@@ -539,7 +624,8 @@
   }
 
   // ---------- payday sort ----------
-  function payday(db, p, per) {
+  function payday(db, p, per) { return memo(db, "pd|" + p + "|" + per.start + "|" + per.next, function () { return pd0(db, p, per); }); }
+  function pd0(db, p, per) {
     var pl = planFor(db, p, per), main = mainOf(db, p), need = {}, why = {};
     var payAcc = (pl.lines.filter(function (l) { return l.isPay; })[0] || {}).account || main;
     pl.lines.forEach(function (l) {
@@ -556,12 +642,19 @@
     });
     var pay = pl.lines.filter(function (l) { return l.isPay; })[0] || null;
     var landed = 0; pl.lines.forEach(function (l) { if (l.kind === "in" && l.account === payAcc) landed += l.amount; });
-    var keeps = round(landed - moves.reduce(function (t, m) { return t + m.amount; }, 0)), cover = null;
-    // the main account would go under: the pot that covers going over tops it up
-    var fb = fallbackOf(db, p);
-    if (keeps < -0.004 && fb) { cover = {from: fb, to: payAcc, amount: round(-keeps), why: "This pay doesn't stretch to everything, so " + accName(db, fb) + " covers the gap", cover: true}; keeps = 0; }
+    var keeps = round(landed - moves.reduce(function (t, m) { return t + m.amount; }, 0)), cover = null, uncovered = 0;
+    // the pay doesn't stretch to everything: the pot that covers going over fills the whole gap (so the main
+    // account still has its own budgets), as far as the money in it goes; the next pay tops it back up
+    var fb = fallbackOf(db, p), gap = round(Math.max(pl.shortfall || 0, -keeps));
+    if (gap > 0.004) {
+      var st = startOf(db, p), fbBal = 0;
+      if (fb) { fbBal = (per.start === st ? startBalances(db, p) : balances(db, addDays(per.start, -1)))[fb] || 0; fbBal = round(Math.max(0, fbBal + (need[fb] > 0 ? need[fb] : 0))); }
+      var amt = round(Math.min(gap, fbBal));
+      if (amt > 0.004) { cover = {from: fb, to: payAcc, amount: amt, why: "This pay doesn't stretch to everything, so " + accName(db, fb) + " covers the gap", cover: true, key: "pay:" + per.start + ":cover"}; keeps = round(keeps + amt); }
+      uncovered = round(gap - amt);
+    }
     var estimate = pl.lines.some(function (l) { return l.estimate; });
-    return {period: per, pay: pay, payAccount: payAcc, moves: moves, cover: cover, already: already, plan: pl, keeps: keeps, estimate: estimate};
+    return {period: per, pay: pay, payAccount: payAcc, moves: moves, cover: cover, uncovered: uncovered, already: already, plan: pl, keeps: keeps, estimate: estimate};
   }
 
   // ---------- between partners ----------
@@ -687,7 +780,7 @@
       var saved = +g.extra || 0, parts = [];
       String(g.accounts || "").split(/[,\s]+/).filter(Boolean).forEach(function (a) { var v = round(bal[a] || 0); saved += v; parts.push({account: a, name: accName(db, a), owner: (db.byId[a] || {}).owner, amount: v}); });
       var target = +g.target || 0;
-      return {id: g.id, name: g.name, kind: g.kind, target: target, saved: round(saved), pct: target ? Math.min(100, Math.round(saved / target * 100)) : 0, by: g.by, parts: parts, notes: g.notes};
+      return {id: g.id, name: g.name, kind: g.kind, target: target, saved: round(saved), pct: target ? Math.min(100, Math.round(saved / target * 100)) : 0, due: g.due || "", parts: parts, notes: g.notes};
     });
   }
   function taxYearStart(date) { var y = +date.slice(0, 4); var s = ymd(y, 3, 6); return date >= s ? s : ymd(y - 1, 3, 6); }
@@ -700,10 +793,11 @@
       if (/^lisa:fee/.test(m.key || "") && m.from === accId) { feeIds[m.id] = 1; if (m.date >= tys && m.date <= date) fees += +m.amount || 0; }
     });
     var months = {}, mk = function (d) { return d.slice(0, 7); }, from12 = ymd(+date.slice(0, 4), +date.slice(5, 7) - 12, 1);
+    var acc = db.byId[accId], ownerStart = acc ? startOf(db, acc.owner) : "", inBeforeStart = 0;
     flows(db, "2000-01-01", date).forEach(function (f) {
       if (f.account !== accId || !f.src || /^val/.test(f.src)) return;
       if (f.date >= from12) { var b = months[mk(f.date)] = months[mk(f.date)] || {paid: 0, bonus: 0, fees: 0}; if (bonusIds[f.src]) b.bonus += f.amount; else if (feeIds[f.src] || f.amount < 0) b.fees += -f.amount; else b.paid += f.amount; }
-      if (f.amount > 0 && !bonusIds[f.src]) { if (f.date >= tys) paid += f.amount; all += f.amount; }
+      if (f.amount > 0 && !bonusIds[f.src]) { if (f.date >= tys) { paid += f.amount; if (f.date < ownerStart) inBeforeStart += f.amount; } all += f.amount; }
     });
     var monthList = [];
     for (var mi = 11; mi >= 0; mi--) { var key = ymd(+date.slice(0, 4), +date.slice(5, 7) - 1 - mi, 1).slice(0, 7), bk = months[key] || {paid: 0, bonus: 0, fees: 0}; monthList.push({month: key, paid: round(bk.paid), bonus: round(bk.bonus), fees: round(bk.fees)}); }
@@ -711,18 +805,22 @@
     var bal = accountValue(db, accId, date), bonus = round(Math.min(1000, paid * 0.25));
     var series = [], first = "9999";
     db.valuations.forEach(function (v) { if (v.account === accId && v.date < first) first = v.date; });
-    var acc = db.byId[accId]; if (first === "9999" && acc) first = startOf(db, acc.owner);
+    if (first === "9999" && acc) first = startOf(db, acc.owner);
     for (var i = 23; i >= 0; i--) { var d = ymd(+date.slice(0, 4), +date.slice(5, 7) - 1 - i, 1); if (i === 0) d = date; if (d >= first) series.push({date: d, amount: accountValue(db, accId, d)}); }
-    // paid in before Budgie started tracking (from the person's Moneybox app), so the £4,000 limit is right
+    // paid in before Budgie started tracking (from the person's Moneybox app), so the £4,000 limit is right;
+    // statement rows copied in for the same months are the same money, so only the rest counts
     var before = acc ? +setting(db, acc.owner, "lisa.paidBefore." + accId, 0) || 0 : 0;
-    if (before && tys <= startOf(db, acc.owner)) paid = round(paid + before);
+    if (before && tys <= ownerStart) paid = round(paid + Math.max(0, before - inBeforeStart));
     bonus = round(Math.min(1000, paid * 0.25));
-    // what's still planned to go in before the tax year ends: savings on each payday and money paid straight in
+    // what's still planned to go in before the tax year ends: savings on each payday (including this period's,
+    // until its move is ticked) and money paid straight in
     var tyEnd = addDays(ymd(+tys.slice(0, 4) + 1, 3, 6), -1), planned = 0, owner = acc ? acc.owner : "";
     if (owner) {
-      db.budgets.forEach(function (b) {
-        if (b.person !== owner || b.mode !== "saving" || b.account !== accId) return;
-        payDates(db, owner, addDays(date, 1), addDays(tyEnd, 1)).forEach(function (d) { if ((!b.start || d >= b.start) && (!b.end || d <= b.end)) planned += amountAt(db, b, d); });
+      var cur = periodAt(db, owner, date);
+      payDates(db, owner, maxS(cur.start, tys), addDays(tyEnd, 1)).forEach(function (d) {
+        if (d <= date && db.moveKeys["pay:" + d + ":" + accId]) return;
+        var pk = periodAt(db, owner, d); if (pk.start !== d || pk.opening) return;
+        db.budgets.forEach(function (b) { if (b.person === owner && b.mode === "saving" && b.account === accId && activeIn(b, pk)) planned += budgetAmount(db, b, pk); });
       });
       db.income.forEach(function (i) { if (i.account === accId) occurrences(db, i, addDays(date, 1), addDays(tyEnd, 1)).forEach(function (o) { planned += o.amount; }); });
     }
@@ -792,7 +890,7 @@
     budgetState: budgetState, balances: balances, flows: flows, todo: todo, between: between, today: today, coming: coming,
     calendar: calendar, pots: pots, monthView: monthView, year: year, goals: goals, lisa: lisa, checks: checks, netWorth: netWorth, loans: loans,
     summary: summary, shareOf: shareOf, amountAt: amountAt, setting: setting, partnerOf: partnerOf, mainOf: mainOf, fallbackOf: fallbackOf,
-    accountsOf: accountsOf, accName: accName, person: person, startOf: startOf,
+    accountsOf: accountsOf, accName: accName, person: person, startOf: startOf, moveDate: moveDate, budgetsOf: budgetsOf, budgetsIn: budgetsOf, reimbursements: reimbursements, startBalances: startBalances,
     money: money, nice: nice, describe: describe, addDays: addDays, diff: diff, parseDate: parseDate, isIso: isIso, round: round
   };
 });

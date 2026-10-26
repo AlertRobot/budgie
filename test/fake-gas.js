@@ -25,7 +25,10 @@ function makeEnv() {
     return api;
   }
   // like typing into a cell: ISO date strings become dates
-  function parseIn(x) { if (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x)) { const [y, m, d] = x.split("-").map(Number); return new Date(y, m - 1, d); } return x; }
+  // a leading apostrophe keeps text as text and isn't stored, like in Sheets
+  function parseIn(x) { if (typeof x === "string" && x[0] === "'") return x.slice(1); if (typeof x === "string" && /^\d{4}-\d{2}-\d{2}$/.test(x)) { const [y, m, d] = x.split("-").map(Number); return new Date(y, m - 1, d); } return x; }
+  const triggers = [], cache = {};
+  const newTrigger = (fn) => { const b = new Proxy({}, {get: (t, k) => k === "create" ? () => { const tr = {getHandlerFunction: () => fn}; triggers.push(tr); return tr; } : () => b}); return b; };
   const ss = {
     getSheetByName: (n) => sheets[n] || null, insertSheet: (n) => (sheets[n] = Sheet(n)), getSpreadsheetTimeZone: () => "Europe/London", getSheets: () => Object.values(sheets),
     getName: () => "Untitled spreadsheet", rename: () => {}, setSpreadsheetTimeZone: () => {}, deleteSheet: (s) => { delete sheets[s.getName()]; }
@@ -41,12 +44,15 @@ function makeEnv() {
       getUuid: () => require("crypto").randomUUID(), base64EncodeWebSafe: (s) => Buffer.from(s).toString("base64url")
     },
     Logger: {log: (x) => logs.push(String(x))},
-    ScriptApp: {getService: () => ({getUrl: () => "https://script.google.com/macros/s/TEST/exec"}), getProjectTriggers: () => [], newTrigger: chain, deleteTrigger: () => {}}
+    ScriptApp: {getService: () => ({getUrl: () => "https://script.google.com/macros/s/TEST/exec"}), getProjectTriggers: () => triggers.slice(), newTrigger: newTrigger, deleteTrigger: (t) => { const i = triggers.indexOf(t); if (i >= 0) triggers.splice(i, 1); }},
+    CacheService: {getScriptCache: () => ({get: (k) => cache[k] ?? null, put: (k, v) => { cache[k] = v; }})}
   };
   vm.createContext(ctx);
   const dir = path.join(__dirname, "..");
   vm.runInContext(fs.readFileSync(path.join(dir, "engine.js"), "utf8"), ctx, {filename: "Engine.gs"});
   vm.runInContext(fs.readFileSync(path.join(dir, "apps-script/Code.gs"), "utf8"), ctx, {filename: "Code.gs"});
-  return {ctx, sheets, props, logs, ss};
+  const prices = path.join(dir, "apps-script/Prices.gs");
+  if (fs.existsSync(prices)) vm.runInContext(fs.readFileSync(prices, "utf8"), ctx, {filename: "Prices.gs"});
+  return {ctx, sheets, props, logs, ss, triggers, cache, Sheet};
 }
 module.exports = makeEnv;

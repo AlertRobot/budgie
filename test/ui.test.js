@@ -59,7 +59,7 @@ const T = s => (s || "").replace(/\s+/g, " ").trim();
   // log a payment from the main account for fuel
   await page.click('nav [data-v="add"]');
   await page.click('[data-a="addpick"][data-v="budget:e-fuel"]'); await page.click('[data-a="addpick"][data-v="account:e-main"]');
-  for (const k of ["3", "5"]) await page.click(`[data-a="key"][data-v="${k}"]`);
+  await page.fill("#addAmt", "35");
   await page.click('[data-a="addsave"]'); await page.waitForTimeout(1200);
   console.log("after log:", T(await page.textContent("#toast")), "|", T(await page.textContent("main")).slice(0, 400));
   const tx = await (await page.request.get("http://localhost:8790/dump?transactions")).json();
@@ -97,7 +97,7 @@ const T = s => (s || "").replace(/\s+/g, " ").trim();
   await page.click('nav [data-v="partner"]'); await shot(page, "31-sophie-partner", true);
   // offline: log a payment, then come back online
   await page.context().setOffline(true);
-  await page.click('nav [data-v="add"]'); await page.click('[data-a="key"][data-v="4"]'); await page.click('[data-a="addsave"]'); await page.waitForTimeout(600);
+  await page.click('nav [data-v="add"]'); await page.fill("#addAmt", "4"); await page.click('[data-a="addsave"]'); await page.waitForTimeout(600);
   console.log("offline header:", T(await page.textContent("#top")));
   await page.context().setOffline(false); await page.evaluate(() => window.BudgieApp.sync(false)); await page.waitForTimeout(1500);
   console.log("back online header:", T(await page.textContent("#top")));
