@@ -4,7 +4,7 @@
   "description": "Your money, your partner, one plan. Works from your own Google Sheet.",
   "start_url": "./",
   "scope": "./",
-  "id": "/budgie/",
+  "id": "/",
   "display": "fullscreen",
   "display_override": [
     "fullscreen",

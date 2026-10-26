@@ -226,7 +226,7 @@
     checks: function () { return ["Things to check", fromTitle()]; },
     edit: function () { return [S.view.p.title || "Edit", fromTitle()]; }, list: function () { return [S.view.p.title || "", fromTitle()]; }, themes: function () { return ["Themes", "How Budgie looks"]; },
     payments: function () { var d = db(), pp = S.view.p, b = pp.budget ? d.byId[pp.budget] : null, per = B.periodAt(d, me(), pp.start || todayIso()); return ["Payments", (b ? b.name.replace(/ \(what's left\)/, "") + " · " : "") + per.name]; },
-    emailset: function () { return ["Sunday email", "Settings"]; },
+    emailset: function () { return ["Sunday email", "Settings"]; }, linked: function () { return ["Linked apps", "Settings"]; },
     bank: function () { return ["Bank connection", "Settings"]; }, review: function () { return ["New payments", "From " + bankName()]; },
     sharing: function () { return ["Partner and sharing", "What " + (person(partner()).name || "your partner") + " sees"]; }, sync: function () { return ["Google Sheet", "Sync and backup"]; }, importcsv: function () { return ["Import", "Bank statement"]; },
     connect: function () { return ["Budgie", "Connect your sheet"]; }
@@ -256,6 +256,7 @@
   }
   function render(background) {
     applyTheme();
+    if (LOCK.locked) { $("#main").innerHTML = ""; $("#nav").innerHTML = ""; $("#top").innerHTML = ""; $("#sheets").innerHTML = ""; return; } // nothing on screen until it's you
     if (!me()) { S.view = {s: "connect", p: {}}; }
     renderTop(); renderNav();
     if (background && formBusy() && S.view.s !== "connect") return;
@@ -331,6 +332,8 @@
       if (t.tiles.some(function (x) { return x.mode === "weekly"; })) html += '<p class="tiny muted hide-easy" style="margin:6px 4px 0">Food is paced week by week, so a big shop at the start of a week isn\'t counted as over.</p>';
     }
     html += comingCard(t.coming);
+    // just after 6 April: last tax year at a glance
+    if (now.slice(5) >= "04-06" && now.slice(5) <= "04-30") html += yearCard(taxYearStart(B.addDays(now, -40)), false);
     return html;
   };
   // "food, fuel and fun", but "food, fuel, fun and spending" when the last one already has an "and" in it
@@ -607,9 +610,10 @@
     var yr = B.yearly ? B.yearly(d, p, now) : [];
     if (yr.length) {
       var perMonth = yr.reduce(function (t, y) { return t + (+y.monthly || 0); }, 0);
-      html += '<h2 class="h2">Yearly costs</h2>' + card('<p class="small muted" style="margin:0 0 6px">Budgie puts a bit by each payday so these are covered when they come. ' + M(perMonth) + " this month in all.</p>" + '<div class="list">' + yr.map(function (y) {
+      html += '<h2 class="h2">Yearly costs</h2>' + card('<p class="small muted" style="margin:0 0 6px">Budgie puts a bit by each payday so these are covered when they come.' + (perMonth > 0.004 ? " " + M(perMonth) + " this month in all." : " It starts from your next payday.") + "</p>" + '<div class="list">' + yr.map(function (y) {
         var pct = y.amount ? Math.min(100, (+y.saved || 0) / y.amount * 100) : 0;
-        return '<button type="button" class="li" data-a="edit" data-v="bills:' + esc(y.id) + '" style="display:block"><div class="row"><span class="what">' + esc(y.name) + "</span>" + num(M(y.amount)) + '</div><div class="small muted">' + (y.next ? "Next " + esc(B.nice(y.next)) + " · " : "") + M(y.monthly) + " this month · " + M(y.saved) + " put by" + (y.onTrack === false ? ' · <span class="warn">behind</span>' : "") + '</div><div style="margin-top:6px">' + bar(pct) + "</div></button>";
+        var how = y.monthly > 0.004 ? M(y.monthly) + " this month · " + M(y.saved) + " put by" : y.saved > 0.004 ? M(y.saved) + " put by" : "Starts next payday";
+        return '<button type="button" class="li" data-a="edit" data-v="bills:' + esc(y.id) + '" style="display:block"><div class="row"><span class="what">' + esc(y.name) + "</span>" + num(M(y.amount)) + '</div><div class="small muted">' + (y.next ? "Next " + esc(B.nice(y.next)) + " · " : "") + how + (y.onTrack === false ? ' · <span class="warn">behind</span>' : "") + '</div><div style="margin-top:6px">' + bar(pct) + "</div></button>";
       }).join("") + "</div>", "flush");
     }
     var tr = d.transfers.filter(function (t) { return t.from === p; });
@@ -817,10 +821,27 @@
     tips.push({t: noSpend + " no-spend day" + (noSpend === 1 ? "" : "s") + " this month", d: "Days you didn't log any spending."});
     var subs = 0, subNames = []; d.bills.forEach(function (b) { if (b.person === p && /sub/i.test(b.category || "")) { var y = 0; B.occurrences(d, b, now, B.addDays(now, 365)).forEach(function (o) { y += o.amount; }); subs += y; subNames.push([b.name, y]); } });
     if (subs) { subNames.sort(function (a, b) { return b[1] - a[1]; }); tips.push({t: "Subscriptions cost " + M0(subs) + " a year", d: esc(subNames[0][0]) + " is the biggest at " + M0(subNames[0][1]) + "."}); }
-    var pl = B.planFor(d, p, per); if (pl.totals.in) tips.push({t: "You're saving " + Math.round(pl.totals.save / pl.totals.in * 100) + "% of what comes in", d: M0(pl.totals.save) + " this month."});
+    var pl = B.planFor(d, p, per); if (pl.totals.in > 0 && !per.opening) tips.push({t: "You're saving " + Math.round(pl.totals.save / pl.totals.in * 100) + "% of what comes in", d: M0(pl.totals.save) + " this month."});
     html += tips.map(function (x) { return card('<div style="font-weight:700">' + x.t + '</div><div class="small muted">' + x.d + "</div>"); }).join("");
+    html += yearCard(taxYearStart(now), true);
     return html;
   };
+  function taxYearStart(iso) { var y = +iso.slice(0, 4); return (iso.slice(5) >= "04-06" ? y : y - 1) + "-04-06"; }
+  // the tax year in money: in Insights all year ("so far"), and on Today for the first weeks after 6 April
+  function yearCard(start, soFar) {
+    if (!B.yearReview) return "";
+    var r; try { r = B.yearReview(db(), me(), start); } catch (e) { return ""; }
+    if (!r || !(r.in > 0)) return ""; // nothing to show until a payday has happened in the year
+    var y = +start.slice(0, 4), label = y + "/" + String(y + 1).slice(2);
+    var top = (r.spent || []).slice().sort(function (a, b) { return b.amount - a.amount; }).slice(0, 3);
+    return '<h2 class="h2">' + (soFar ? "This tax year so far" : "Your " + label + " in money") + "</h2>" + card('<div class="list">' +
+      li("Money in", soFar ? esc(label) + ", from " + esc(B.nice(r.from)) : "", num(M0(r.in))) +
+      (r.saved >= 0 ? li("Saved", r.savedPct !== undefined ? r.savedPct + "% of what came in" : "", num(M0(r.saved))) : li("Took out of savings", "More came out of savings than went in", num(M0(-r.saved), "warn"))) +
+      (top.length ? li("Where most of it went", top.map(function (x) { return esc(x.name) + " " + M0(x.amount); }).join(" · "), "") : "") +
+      (r.lisa && (r.lisa.paidIn || r.lisa.bonus) ? li("Lifetime ISA", "Paid in " + M0(r.lisa.paidIn) + " · bonus " + M0(r.lisa.bonus), "") : "") +
+      (r.biggestMonth ? li("Biggest month", esc(r.biggestMonth.name || r.biggestMonth.month), num(M0(r.biggestMonth.amount))) : "") +
+      (r.noSpendDays ? li("No-spend days", "", num(String(r.noSpendDays))) : "") + "</div>", "flush");
+  }
 
   // ----- Gifts
   SCREENS.gifts = function () {
@@ -834,7 +855,7 @@
   };
 
   // ----- Things to check (figures Budgie had to guess when it was set up)
-  function checkList() { return demoOn() || !me() ? [] : B.checks(db(), me()); }
+  function checkList() { return demoOn() || !me() ? [] : B.checks(db(), me(), todayIso()); }
   function checkRows(list) {
     return list.map(function (c) {
       return '<div class="li" style="flex-wrap:wrap;gap:8px"><span class="grow" style="min-width:200px"><span class="what">' + esc(c.text) + "</span></span>" +
@@ -859,6 +880,7 @@
       ["You", [["list:income", "Pay and money coming in", "Paydays, pay rises, one-offs"], ["account", "Your account", (person().name || "") + " · " + (person().bank || "")], ["bank", "Bank connection", bankLabel()], ["emailset", "Sunday money email", /^true$/i.test(String(getSetting("email.sunday", ""))) ? "On: to " + getSetting("email.to", "") : "A weekly round-up in your inbox"]]],
       ["Your money", [["bills", "Bills and subscriptions", "Add, change or stop a bill"], ["list:budgets", "Budgets", "Food, fun and the rest"], ["list:accounts", w, "What each one is for"], ["goals", "Goals", "House, car, holidays"], ["gifts", "Gifts", "Ideas and spending"]]],
       ["Together", [["sharing", "Partner and sharing", "What " + (person(partner()).name || "your partner") + " can see"], ["list:splits", "How you split things", "For example 2 parts to 1"], ["list:transfers", "Regular payments to " + (person(partner()).name || "partner"), "Like your rent share"], ["debts", "Money owed between you", "Furniture and the like"]]],
+      ["Linked apps", [["linked", "Peckish and Caledonite", "Food shops both ways; paydays and bills in your calendar"]]],
       ["App", [["themes", "Themes", themeLabel()], ["toggle:easy", "Easy read", isEasy() ? "On: simpler screens in an easy-to-read font" : "Simpler screens in an easy-to-read font"], ["toggle:lock", "Fingerprint lock", lockOn() ? "On: Budgie checks it's you when you open it" : "Check it's you before showing anything"], ["toggle:hide", "Hide amounts", S.prefs.hide ? "On: tap the eye to peek" : "Cover numbers with £••••"], ["toggle:demo", "Show and tell", demoOn() ? "On: sample data" : "Show the app off with made-up money"], ["sync", "Google Sheet and sync", demoOn() ? "Not used in Show and tell" : syncLabel()], ["importcsv", "Import a bank statement", "Add payments from a CSV file"]]]
     ];
     if (todo.length) groups.unshift(["To check", [["checks", todo.length + " thing" + (todo.length === 1 ? "" : "s") + " Budgie guessed", "Confirm or change them"]]]);
@@ -900,34 +922,42 @@
     if (!b) { bankRefresh(); return '<p class="empty">Checking…</p>'; }
     var safety = '<div class="banner small"><b>Read-only.</b> Budgie only reads your balances, payments and ' + (isStarling ? "Spaces" : "pots") + ". It can't move or send money. Your " + (isStarling ? "key" : "sign-in") + " is kept inside your Google Sheet's script, never on this phone or anywhere else, and you can switch it off at any time" + (isStarling ? " by deleting the key on Starling's developer site." : " by disconnecting here or in the Monzo app.") + "</div>";
     if (b.err && !b.provider) return card('<p class="bad small">' + esc(b.err) + '</p><button type="button" class="btn ghost sm" data-a="bankre">Try again</button>');
+    if (b.waitingForApproval) return safety + card('<h2>Nearly there</h2><p class="muted">Open the Monzo app and approve Budgie. Once you have, Budgie brings in your payments within a minute or two.</p><button type="button" class="btn ghost wide" data-a="bankre">I\'ve approved it</button>');
     if (!b.connected) {
       var url = esc((S.cfg || {}).u || "");
       if (isStarling) return safety + card('<h2>Connect Starling</h2><ol class="steps">' +
         '<li>On a computer or your phone\'s browser, go to <b>developer.starlingbank.com</b> and sign up with the email you use for Starling.</li>' +
         '<li>Open <b>Personal access</b>, link your account and approve it in the Starling app.</li>' +
-        '<li>Create a <b>personal access token</b>. Tick only these: <b>account:read</b>, <b>balance:read</b>, <b>transaction:read</b> and <b>savings-goal:read</b> (and <b>space:read</b> if you see it). Nothing else. Budgie turns away a key that could move money.</li>' +
+        '<li>Create a <b>personal access token</b>. Tick only boxes that end in <b>:read</b>: you need <b>account-list:read</b>, <b>balance:read</b> and <b>transaction:read</b>, and <b>account:read</b>, <b>savings-goal:read</b> and <b>space:read</b> help with Spaces. Leave everything else unticked. Budgie turns away a key that could move money.</li>' +
         '<li>Copy the token and paste it here.</li></ol>' +
-        '<label class="f">Your token<input type="password" id="stTok" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste it here"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="bankstarling">Connect</button><p class="tiny muted" style="margin:8px 0 0">The token goes straight to your Google Sheet\'s script and is never shown again.</p>');
+        '<label class="f">Your token<input type="text" class="secret" id="stTok" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Paste it here"></label><button type="button" class="btn wide" style="margin-top:12px" data-a="bankstarling">Connect</button><p class="tiny muted" style="margin:8px 0 0">The token goes straight to your Google Sheet\'s script and is never shown again. Afterwards, clear your keyboard\'s clipboard history so it isn\'t kept there.</p>');
       return safety + card('<h2>Connect Monzo</h2><ol class="steps">' +
         '<li>Go to <b>developers.monzo.com</b> and sign in with your Monzo email, then approve it in the Monzo app.</li>' +
         '<li>Open <b>Clients</b> and make a <b>New OAuth Client</b>. Name: Budgie. Logo: leave empty. Redirect URL: <span class="copy">' + url + '</span> <button type="button" class="linkbtn" data-a="bankcopy">Copy</button>. Confidentiality: <b>Confidential</b>.</li>' +
         '<li>Copy the <b>Client ID</b> and <b>Client secret</b> into the boxes below and tap Connect.</li>' +
         '<li>Monzo opens: sign in, then approve Budgie in the Monzo app. Budgie fetches your history straight away.</li></ol>' +
-        '<label class="f">Client ID<input type="text" id="mzId" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="f">Client secret<input type="password" id="mzSecret" autocomplete="off" autocapitalize="off" spellcheck="false"></label>' +
+        '<label class="f">Client ID<input type="text" id="mzId" autocomplete="off" autocapitalize="off" spellcheck="false"></label><label class="f">Client secret<input type="text" class="secret" id="mzSecret" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></label>' +
         '<button type="button" class="btn wide" style="margin-top:12px" data-a="bankmonzo">Connect Monzo</button><p class="tiny muted" style="margin:8px 0 0">Every 90 days Monzo asks you to approve Budgie again in the Monzo app. Budgie reminds you a week before.</p>');
     }
     var d = db(), accs = B.accountsOf(d, me());
+    // not matched yet: suggest the Budgie account with the same name ("Food" and "Food pot")
+    var words = function (n) { return String(n || "").toLowerCase().replace(/\b(pot|space|account|the|my)\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim(); };
+    var guess = function (x) { if (x.kind === "main") return B.mainOf(d, me()); var w = words(x.name), hit = accs.filter(function (a) { return w && words(a.name) === w; })[0] || accs.filter(function (a) { var aw = words(a.name); return w && aw && (aw.indexOf(w) >= 0 || w.indexOf(aw) >= 0); })[0]; return hit ? hit.id : ""; };
+    S.ui.bankGuess = {};
     var rows = (b.accounts || []).map(function (x) {
-      return '<div class="li" style="flex-wrap:wrap;gap:6px"><span class="grow" style="min-width:140px"><span class="what">' + esc(x.name) + '</span><span class="why">' + esc(({main: "Main account", pot: "Pot", space: "Space", credit: "Credit"})[x.kind] || "") + (x.balance !== undefined ? " · " + M(x.balance) : "") + "</span></span>" +
-        '<select data-c="bankmap" data-v="' + esc(x.extId) + '" aria-label="Which Budgie account is ' + esc(x.name) + '" style="min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);padding:0 8px;max-width:100%"><option value="">Ignore it</option>' + accs.map(function (a) { return '<option value="' + esc(a.id) + '"' + (x.mappedTo === a.id ? " selected" : "") + ">" + esc(a.name) + "</option>"; }).join("") + "</select></div>";
+      var unset = x.mappedTo === null || x.mappedTo === undefined, sug = unset ? guess(x) : "", cur = unset ? null : x.mappedTo, suggested = !!sug;
+      if (suggested) S.ui.bankGuess[x.extId] = sug;
+      return '<div class="li" style="flex-wrap:wrap;gap:6px"><span class="grow" style="min-width:140px"><span class="what">' + esc(x.name) + '</span><span class="why">' + esc(({main: "Main account", pot: "Pot", space: "Space", credit: "Credit"})[x.kind] || "") + (x.balance !== undefined ? " · " + M(x.balance) : "") + (suggested ? ' · <span class="warn">looks like ' + esc(B.accName(d, sug)) + "</span>" : unset ? ' · <span class="warn">not matched yet</span>' : "") + "</span></span>" +
+        '<select data-c="bankmap" data-v="' + esc(x.extId) + '" aria-label="Which Budgie account is ' + esc(x.name) + '" style="min-height:44px;border-radius:10px;border:1px solid var(--line);background:var(--card);padding:0 8px;max-width:100%">' + (unset ? '<option value="" selected disabled>Choose…</option>' : "") + '<option value=""' + (cur === "" ? " selected" : "") + ">Ignore it</option>" + accs.map(function (a) { return '<option value="' + esc(a.id) + '"' + (cur === a.id ? " selected" : "") + ">" + esc(a.name) + "</option>"; }).join("") + "</select></div>";
     }).join("");
+    var nGuess = Object.keys(S.ui.bankGuess).length;
     var reN = reviewRows().length;
     return card('<div class="row"><h2>' + esc(bankName()) + '</h2><span class="small ' + (b.needsReconnect ? "bad" : "good") + '" style="font-weight:700">' + (b.needsReconnect ? "Needs reconnecting" : "Connected") + "</span></div>" +
         '<div class="small muted">' + (b.lastSync ? "Last checked " + esc(ago(b.lastSync)) + ". " : "") + "Budgie checks every 15 minutes." + (b.reapproveBy ? " Approve it again in the Monzo app by " + esc(B.nice(String(b.reapproveBy).slice(0, 10))) + "." : "") + "</div>" +
         (b.lastError ? '<p class="small bad">' + esc(b.lastError) + "</p>" : "") +
         (reN ? '<button type="button" class="btn wide" style="margin-top:12px" data-a="go" data-v="review">Check ' + reN + " new payment" + (reN === 1 ? "" : "s") + "</button>" : "") +
         '<div class="two" style="margin-top:12px"><button type="button" class="btn ghost" data-a="banksync">Check now</button>' + (b.needsReconnect && b.provider === "monzo" ? '<button type="button" class="btn" data-a="bankmonzo2">Reconnect</button>' : "") + "</div>") +
-      (rows ? '<h2 class="h2">Which is which</h2><p class="small muted" style="margin:-4px 4px 6px">Tell Budgie which of its accounts each one is. Moves between them tick off your payday list by themselves.</p>' + card('<div class="list">' + rows + "</div>", "flush") : "") +
+      (rows ? '<h2 class="h2">Which is which</h2><p class="small muted" style="margin:-4px 4px 6px">Tell Budgie which of its accounts each one is. Moves between them tick off your payday list by themselves.</p>' + card('<div class="list">' + rows + "</div>", "flush") + (nGuess ? '<button type="button" class="btn wide" style="margin-top:10px" data-a="bankguess">Match ' + (nGuess === 1 ? "it" : "all " + nGuess) + " the way Budgie suggests</button>" : "") : "") +
       safety + '<button type="button" class="btn danger wide" style="margin-top:14px" data-a="bankoff">Disconnect ' + esc(bankName()) + "</button>";
   };
   // new payments from the bank: check what they were for
@@ -940,17 +970,36 @@
       return card('<div class="row"><span style="font-weight:700">' + esc(x.note || "Payment") + "</span>" + num(M(x.amount)) + '</div><div class="small muted">' + esc(B.nice(x.date)) + " · " + esc(B.accName(d, x.account)) + "</div>" +
         '<div class="chips" style="margin-top:8px">' + opts.map(function (b) { return '<button type="button" class="chip" data-a="revbud" data-v="' + esc(x.id) + "|" + esc(b.id) + '" aria-pressed="' + (x.budget === b.id) + '">' + esc(budName(b)) + "</button>"; }).join("") +
         (buds.length > opts.length ? '<button type="button" class="chip" style="border-style:dashed" data-a="revmore" data-v="' + esc(x.id) + '">Other…</button>' : "") + "</div>" +
-        '<div class="row" style="margin-top:8px;align-items:center">' + (partner() ? '<button type="button" class="detail' + (x.split ? " on" : "") + '" data-a="revsplit" data-v="' + esc(x.id) + '">' + (x.split ? "Split with " + esc(q) : "Not split") + "</button>" : "<span></span>") +
+        '<div class="row" style="margin-top:8px;align-items:center">' + (partner() ? '<button type="button" class="detail' + (revSplit(x) ? " on" : "") + '" data-a="revsplit" data-v="' + esc(x.id) + '">' + (revSplit(x) ? "Split with " + esc(q) : "Not split") + "</button>" : "<span></span>") +
         '<button type="button" class="btn sm" data-a="revok" data-v="' + esc(x.id) + '"' + (x.budget ? "" : " disabled") + ">Right</button></div>");
     }).join("") + (list.some(function (x) { return x.budget; }) ? '<button type="button" class="btn ghost wide" style="margin-top:12px" data-a="revall">All the rest look right</button>' : "");
   };
-  function merchantKey(name) { return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
+  // the same as the sheet's bankMerchantKey_: store numbers and the like are dropped
+  // the split a learned rule suggests for this payment ("budget|split"), applied only when you confirm it
+  function splitHint(x) { var r = String(getSetting("bank.rule." + merchantKey(x.note), "") || ""), k = r.split("|"); return k[1] || ""; }
+  function revSplit(x) { var o = (S.ui.revSplit || {})[x.id]; return o !== undefined ? o : (x.split || splitHint(x)); }
+  function merchantKey(name) { return String(name || "").toLowerCase().replace(/[^a-z]+/g, " ").replace(/\b(stores?|ltd|limited|plc|uk|gb|london|www|com|co)\b/g, " ").replace(/\s+/g, " ").trim(); }
   function reviewSave(id, patch, learn) {
     var x = (tables().transactions || []).filter(function (r) { return r.id === id; })[0]; if (!x) return;
     var row = put("transactions", Object.assign({}, x, patch), true);
     if (learn && row.budget && x.note) setting("bank.rule." + merchantKey(x.note), row.budget + (row.split ? "|" + row.split : ""));
     return row;
   }
+
+  // ----- Linked apps: each gets its own limited link, never Budgie's full one
+  var APPS = [["peckish", "Peckish", "Food shops you log in either app show in both, split half each. Peckish can only add food shops and see your food budget, nothing else.", "https://alertrobot.github.io/es-kitchen/", "Settings, then Linked apps, then Budgie"],
+    ["caledonite", "Caledonite", "Your paydays and bills show in your calendar, plus what's left for fun until payday. Caledonite can only see those, and can't change anything.", "https://alertrobot.github.io/caledonite/", "Settings, then Linked apps, then Budgie"]];
+  SCREENS.linked = function () {
+    if (demoOn()) return card("<p>Show and tell is on, so there's nothing to link.</p>");
+    var st = S.appsState || {};
+    if (!S.appsState) bankCall("app.status").then(function (j) { S.appsState = j.apps || {}; render(true); }, function () { S.appsState = {}; render(true); });
+    return '<p class="small muted" style="margin:0 4px 10px">Each app gets its own link that only lets it do its one job. Making a new link switches off the old one.</p>' + APPS.map(function (a) {
+      var on = !!st[a[0]], made = S.ui.appLink && S.ui.appLink.app === a[0] ? S.ui.appLink.link : "";
+      return card('<div class="row"><h2>' + a[1] + '</h2><span class="small ' + (on ? "good" : "muted") + '" style="font-weight:700">' + (on ? "Linked" : "Not linked") + '</span></div><p class="small muted">' + esc(a[2]) + "</p>" +
+        (made ? '<label class="f">Your link for ' + a[1] + '<input type="text" class="secret" readonly value="' + esc(made) + '" id="appLinkOut"></label><div class="two" style="margin-top:8px"><button type="button" class="btn" data-a="applinkcopy">Copy it</button><a class="btn ghost" style="display:flex;align-items:center;justify-content:center;text-decoration:none" href="' + a[3] + '" target="_blank" rel="noopener">Open ' + a[1] + '</a></div><p class="tiny muted" style="margin:8px 0 0">In ' + a[1] + ": " + esc(a[4]) + ", and paste it. Then clear your clipboard.</p>" :
+          '<div class="two" style="margin-top:8px"><button type="button" class="btn' + (on ? " ghost" : "") + '" data-a="applink" data-v="' + a[0] + '">' + (on ? "Make a new link" : "Link " + a[1]) + "</button>" + (on ? '<button type="button" class="btn danger" data-a="appunlink" data-v="' + a[0] + '">Unlink</button>' : "") + "</div>"));
+    }).join("");
+  };
 
   SCREENS.emailset = function () {
     var on = /^true$/i.test(String(getSetting("email.sunday", ""))), to = getSetting("email.to", "");
@@ -1206,6 +1255,7 @@
     demoas: function (v) { S.demo.me = v; dirty(); S.prefs.easy = null; go("today"); },
     demo: function (v) { setDemo(v === "on"); go("today"); },
     connect: function () { var v = ($("#connectLink") || {}).value || ""; connectFrom(v); },
+    connectswitch: function () { closeSheet(); S.ui.connectOk = true; connectFrom(S.ui.pendingLink || ""); },
     moneyview: function (v) { S.ui.money = v; render(); }, month: function (v) { S.ui.monthOff += +v; render(); }, cal: function (v) { S.ui.calOff += +v; render(); },
     calday: function (v) { calDay(v); }, occ: function (v) { occSheet(v); }, occskip: function (v) { occSheet(v); occDo("skip"); }, occdo: function (v) { var k = v.split("|"); occDo(k[0]); },
     occsave: function (v) {
@@ -1324,6 +1374,9 @@
     },
     syncnow: function () { if (sheetOpen()) closeSheet(); sync(false); }, syncfull: function () { sync(true); },
     unlock: function () { unlock(); },
+    applink: function (v) { bankCall("app.link", {app: v}).then(function (j) { S.ui.appLink = {app: v, link: j.link}; S.appsState = Object.assign(S.appsState || {}, (function () { var o = {}; o[v] = true; return o; })()); render(); }, function (e) { toast(e.message); }); },
+    applinkcopy: function () { var v = ($("#appLinkOut") || {}).value || ""; try { navigator.clipboard.writeText(v).then(function () { toast("Copied. Paste it into the other app."); }); } catch (e) { toast("Press and hold the link to copy it"); } },
+    appunlink: function (v) { bankCall("app.unlink", {app: v}).then(function () { if (S.appsState) S.appsState[v] = false; S.ui.appLink = null; toast("Unlinked"); render(); }, function (e) { toast(e.message); }); },
     bankre: function () { S.bank = null; render(); },
     bankcopy: function () { try { navigator.clipboard.writeText((S.cfg || {}).u || ""); toast("Copied"); } catch (e) { toast("Couldn't copy. Press and hold to copy it."); } },
     bankmonzo: function () {
@@ -1341,14 +1394,19 @@
       toast("Checking the token…");
       bankCall("bank.starling.setToken", {token: t}).then(function () { ($("#stTok") || {}).value = ""; toast("Connected to Starling"); return bankRefresh(); }).then(function () { sync(false); }, function (e) { toast(e.message); });
     },
+    bankguess: function () {
+      var g = S.ui.bankGuess || {}, ids = Object.keys(g); if (!ids.length) return;
+      toast("Saving…");
+      ids.reduce(function (pr, id) { return pr.then(function () { return bankCall("bank.map", {extId: id, account: g[id]}); }); }, Promise.resolve()).then(function () { toast("Saved"); return bankRefresh(); }, function (e) { toast(e.message); });
+    },
     banksync: function () { toast("Checking…"); bankCall("bank.syncNow").then(function (j) { toast(j.added || j.updated ? (j.added || 0) + " new, " + (j.updated || 0) + " updated" : "Nothing new"); sync(false); return bankRefresh(); }, function (e) { toast(e.message); }); },
-    bankoff: function () { openSheet("<h2>Disconnect " + esc(bankName()) + '?</h2><p class="muted">Budgie stops reading your bank and forgets its key. Payments it already brought in stay.</p><button type="button" class="btn danger wide" data-a="bankoff2">Disconnect</button><button type="button" class="btn ghost wide" style="margin-top:10px" data-a="sheetclose">Keep it</button>'); },
+    bankoff: function () { openSheet("<h2>Disconnect " + esc(bankName()) + '?</h2><p class="muted">Budgie stops reading your bank and forgets its key. Payments it already brought in stay.' + (bankName() === "Starling" ? " Also delete the token on developer.starlingbank.com, so it can't be used again." : "") + "</p>" + '<button type="button" class="btn danger wide" data-a="bankoff2">Disconnect</button><button type="button" class="btn ghost wide" style="margin-top:10px" data-a="sheetclose">Keep it</button>'); },
     bankoff2: function () { closeSheet(); bankCall("bank.disconnect").then(function () { toast("Disconnected"); return bankRefresh(); }, function (e) { toast(e.message); }); },
     revbud: function (v) { var k = v.split("|"); reviewSave(k[0], {budget: k[1]}, false); closeSheet(); render(); },
     revmore: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0] || {}; openSheet('<h2>What was it for?</h2><div class="budgrid" style="margin-top:12px">' + spendBudgets().map(function (b) { return '<button type="button" class="budtile" data-a="revbud" data-v="' + esc(v) + "|" + esc(b.id) + '" aria-pressed="' + (x.budget === b.id) + '">' + icon(budIcon(b.name), 22) + "<span>" + esc(budName(b)) + "</span></button>"; }).join("") + "</div>"); },
-    revsplit: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0]; if (!x) return; reviewSave(v, {split: x.split ? "" : "half"}, false); render(); },
-    revok: function (v) { reviewSave(v, {review: false}, true); toast("Got it"); render(); },
-    revall: function () { var n = 0; reviewRows().forEach(function (x) { if (x.budget) { reviewSave(x.id, {review: false}, true); n++; } }); toast(n + " done"); render(); },
+    revsplit: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0]; if (!x) return; S.ui.revSplit = S.ui.revSplit || {}; S.ui.revSplit[v] = revSplit(x) ? "" : (splitHint(x) || "half"); render(); },
+    revok: function (v) { var x = (tables().transactions || []).filter(function (r) { return r.id === v; })[0]; if (!x) return; reviewSave(v, {review: false, split: revSplit(x)}, true); toast("Got it"); render(); },
+    revall: function () { var n = 0; reviewRows().forEach(function (x) { if (x.budget) { reviewSave(x.id, {review: false, split: revSplit(x)}, true); n++; } }); toast(n + " done"); render(); },
     emailsave: function () {
       var to = String(($("#emailTo") || {}).value || "").trim(), on = !!($('[data-c="emailon"]') || {}).checked;
       if (on && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) { toast("That email address doesn't look right"); return; }
@@ -1395,7 +1453,7 @@
     if (c === "toggle") {
       if (v === "easy") { S.prefs.easy = el.checked; savePrefs(); if (!demoOn() && me()) setting("easy", el.checked); applyTheme(); render(); }
       if (v === "hide") { S.prefs.hide = el.checked; S.ui.reveal = false; savePrefs(); render(); }
-      if (v === "lock") { if (el.checked) lockEnable().then(function () { render(); }); else { lockDisable(); render(); } }
+      if (v === "lock") { if (el.checked) lockEnable().then(function () { render(); }); else lockDisable().then(function () { render(); }); }
       if (v === "demo") { setDemo(el.checked); go("today"); }
       return;
     }
@@ -1457,30 +1515,38 @@
       LOCK.cred = {id: b64u(cred.rawId), at: Date.now()}; LS.set("budgie.lock", LOCK.cred); toast("Fingerprint lock is on"); return true;
     } catch (e) { toast(e && e.name === "NotAllowedError" ? "Fingerprint lock wasn't turned on" : "Couldn't set up the fingerprint lock: " + (e && e.message || e)); return false; }
   }
-  function lockDisable() { LOCK.cred = null; LS.set("budgie.lock", null); LOCK.locked = false; showLock(false); toast("Fingerprint lock is off"); }
+  // turning the lock off needs your fingerprint too
+  async function lockDisable() {
+    if (!(await lockCheck())) { toast("Fingerprint lock is still on"); return false; }
+    LOCK.cred = null; LS.set("budgie.lock", null); LOCK.locked = false; showLock(false); toast("Fingerprint lock is off"); return true;
+  }
   function showLock(on, waiting) {
     var el = $("#lock");
+    ["#app", "#nav", "#sheets", "#toast"].forEach(function (q) { var x = $(q); if (!x) return; x.inert = !!on; if (on) x.setAttribute("aria-hidden", "true"); else x.removeAttribute("aria-hidden"); });
     if (!on) { if (el) el.remove(); return; }
     if (!el) { el = document.createElement("div"); el.id = "lock"; el.setAttribute("role", "dialog"); el.setAttribute("aria-label", "Budgie is locked"); document.body.appendChild(el); }
     el.innerHTML = '<div class="in"><img src="icon-192.png" alt="" width="72" height="72" style="border-radius:18px"><h1>Budgie is locked</h1>' + (waiting ? "" : '<button type="button" class="btn wide" data-a="unlock">Unlock with your fingerprint</button><p class="small" style="opacity:.8;margin-top:10px">Or your face or screen lock, whichever your phone uses.</p>') + "</div>";
   }
+  // ask the phone to check it's you; true only if it says it did (flag 0x04 in its answer)
+  async function lockCheck() {
+    if (!lockOn()) return true;
+    try {
+      var a = await navigator.credentials.get({publicKey: {challenge: rnd(32), rpId: location.hostname, allowCredentials: [{type: "public-key", id: unb64u(LOCK.cred.id), transports: ["internal"]}], userVerification: "required", timeout: 60000}});
+      var flags = a && a.response && a.response.authenticatorData ? new Uint8Array(a.response.authenticatorData)[32] : 0;
+      return !!(a && (flags & 0x04));
+    } catch (e) { if (e && e.name === "InvalidStateError") toast("This phone no longer knows Budgie's lock. Check your phone's passkeys."); return false; }
+  }
   async function unlock() {
     if (LOCK.busy || !lockOn()) return;
     LOCK.busy = true;
-    try {
-      var a = await navigator.credentials.get({publicKey: {challenge: rnd(32), rpId: location.hostname, allowCredentials: [{type: "public-key", id: unb64u(LOCK.cred.id), transports: ["internal"]}], userVerification: "required", timeout: 60000}});
-      // the phone only answers once it has checked you: flag 0x04 in the answer says it did
-      var flags = a && a.response && a.response.authenticatorData ? new Uint8Array(a.response.authenticatorData)[32] : 0;
-      if (a && (flags & 0x04)) { LOCK.locked = false; showLock(false); render(); }
-      else showLock(true);
-    } catch (e) { showLock(true); if (e && e.name === "InvalidStateError") toast("This phone no longer knows Budgie's lock. Turn it off and on again in Settings."); }
+    try { if (await lockCheck()) { LOCK.locked = false; showLock(false); render(); } else showLock(true); }
     finally { LOCK.busy = false; }
   }
   function lockNow() { if (!lockOn()) return; LOCK.locked = true; showLock(true); }
   document.addEventListener("visibilitychange", function () {
     if (!lockOn()) return;
     if (document.visibilityState === "hidden") { LOCK.hiddenAt = Date.now(); if (!LOCK.locked) showLock(true, true); }
-    else if (LOCK.locked || Date.now() - LOCK.hiddenAt > LOCK.GRACE) { LOCK.locked = true; showLock(true); unlock(); }
+    else if (LOCK.locked || Date.now() - LOCK.hiddenAt > LOCK.GRACE) { LOCK.locked = true; render(); showLock(true); unlock(); }
     else showLock(false);
   });
 
@@ -1499,6 +1565,15 @@
     var host = ""; try { host = new URL(j.u).hostname; } catch (e) {}
     if (!/^(script\.google\.com|script\.googleusercontent\.com|localhost|127\.0\.0\.1)$/.test(host)) { S.lastError = "That connect link doesn't point at a Google Sheet, so Budgie won't use it."; render(); return false; }
     var same = S.cfg && S.cfg.u === j.u && S.cfg.k === j.k;
+    // a link to a different Google Sheet than the one this phone uses could be someone else's: ask first
+    if (S.cfg && S.cfg.u !== j.u && !S.ui.connectOk) {
+      S.ui.pendingLink = text;
+      try { history.replaceState(null, "", location.pathname); } catch (e) {}
+      render();
+      openSheet('<h2>Switch to a different sheet?</h2><p class="muted">This link points to a different Google Sheet from the one Budgie uses on this phone. Only switch if you set up a new sheet yourself. A link from anyone else could send your details to them.</p>' + (S.data.queue.length ? '<p class="bad small" style="font-weight:600">' + S.data.queue.length + " change" + (S.data.queue.length === 1 ? " hasn't" : "s haven't") + " reached your sheet yet and would be lost.</p>" : "") + '<button type="button" class="btn ghost wide" data-a="sheetclose">Keep my sheet</button><button type="button" class="btn danger wide" style="margin-top:10px" data-a="connectswitch">Switch anyway</button>');
+      return true;
+    }
+    S.ui.connectOk = false;
     S.cfg = {u: j.u, k: j.k}; LS.set("budgie.cfg", S.cfg);
     // opening the same link again keeps anything still waiting to sync
     if (!same) { S.data = {tables: {}, since: 0, me: "", summary: null, queue: []}; store.set("data", S.data); }
@@ -1509,9 +1584,35 @@
     sync(true).then(function () { if (S.data.me) toast("Connected. Hi " + person().name + "!"); go("today"); });
     return true;
   }
+  // ---------- Budgie's new home ----------
+  // Budgie used to live at alertrobot.github.io/budgie, next to Peckish and Caledonite. It now has a web address of
+  // its own, so nothing else can read its data. Opening the old address offers to carry this phone across: it sends
+  // anything waiting, opens the new address with this phone's connect link, then wipes Budgie's copy at the old one.
+  var HOME = "https://budgie-money.github.io/";
+  var isOldHome = function () { return /^alertrobot\.github\.io$/i.test(location.hostname); };
+  function movedScreen() {
+    $("#top").innerHTML = '<div class="t"><div class="sub">Budgie</div><h1>Budgie has moved</h1></div>'; $("#nav").innerHTML = "";
+    $("#main").innerHTML = card('<h2 style="font-size:20px">A new home, just for Budgie</h2><p class="muted">Budgie now lives at <b>budgie-money.github.io</b>, on its own, so no other app can read your money. Your data is safe in your Google Sheet; this just moves this phone across.</p>' +
+      (S.cfg ? '<button type="button" class="btn wide" data-a="moveme">Move this phone across</button><p class="tiny muted" style="margin:8px 0 0">Anything waiting to sync goes first. Then Budgie opens at its new address, signed in, and clears its old copy here. Afterwards, add the new Budgie to your home screen and remove the old one' + (lockOn() ? ", and turn the fingerprint lock back on in Settings" : "") + ".</p>" : '<a class="btn wide" style="display:flex;align-items:center;justify-content:center;text-decoration:none" href="' + HOME + '">Open the new Budgie</a>'));
+  }
+  async function moveMe() {
+    if (lockOn() && !(await lockCheck())) { toast("Budgie needs to check it's you first"); return; }
+    toast("Sending anything waiting…");
+    for (var i = 0; i < 5 && S.data.queue.length; i++) { await sync(false); if (S.data.queue.length) await new Promise(function (r) { setTimeout(r, 1500); }); }
+    if (S.data.queue.length) { toast("Couldn't reach your sheet yet. Try again when you have signal."); return; }
+    var link = HOME + "#connect=" + btoa(unescape(encodeURIComponent(JSON.stringify({u: S.cfg.u, k: S.cfg.k})))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    // wipe the old copy so nothing at this address can read it
+    try { Object.keys(localStorage).forEach(function (k) { if (/^budgie\./.test(k)) localStorage.removeItem(k); }); } catch (e) {}
+    try { if (store.db) store.db.close(); indexedDB.deleteDatabase("budgie"); } catch (e) {}
+    try { (await caches.keys()).forEach(function (k) { if (/^budgie-/.test(k)) caches.delete(k); }); } catch (e) {}
+    try { (await navigator.serviceWorker.getRegistrations()).forEach(function (r) { if (/\/budgie\//.test(r.scope)) r.unregister(); }); } catch (e) {}
+    location.replace(link);
+  }
+
   async function start() {
     await store.open();
     var saved = await store.get("data"); if (saved && saved.tables) S.data = Object.assign(S.data, saved);
+    if (isOldHome()) { document.addEventListener("click", function (e) { var el = e.target.closest('[data-a="moveme"]'); if (el) moveMe(); }); movedScreen(); return; }
     if (S.prefs.demo) setDemo(true);
     if (lockOn()) { lockNow(); unlock(); }
     setInterval(function () { if (document.visibilityState === "visible") sync(false); }, 60000);
